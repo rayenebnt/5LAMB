@@ -1,0 +1,15 @@
+# AWS SAM CLI configuration (sam deploy reads the [default] environment).
+# Use `npm run deploy:guided` the first time to choose the region and parameters.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "blogify-dev"
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "Stage=\"dev\" AutoConfirmUsers=\"true\" EnableMediaCdn=\"true\""

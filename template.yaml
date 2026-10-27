@@ -1,0 +1,958 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Blogify - plateforme de blogging headless 100 % serverless
+  (API Gateway REST, AWS Lambda, Amazon DynamoDB, Amazon S3, Amazon Cognito,
+  Amazon SNS, Amazon EventBridge, Amazon CloudFront).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: General }
+        Parameters: [Stage, AllowedOrigin, PublicSiteUrl, LogRetentionDays]
+      - Label: { default: Users }
+        Parameters: [AdminEmail, AutoConfirmUsers]
+      - Label: { default: Media }
+        Parameters: [EnableMediaCdn, MaxImageSizeMB, MaxVideoSizeMB]
+      - Label: { default: AWS Academy / Learner Lab }
+        Parameters: [LambdaRoleArn]
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedPattern: '^[a-z0-9-]{1,12}$'
+    Description: Deployment stage (API Gateway stage name, used in resource names).
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+    Description: CORS allowed origin of the front-end(s), e.g. https://blog.example.com ('*' = any).
+  PublicSiteUrl:
+    Type: String
+    Default: ''
+    Description: Optional public URL of the blog front-end, used to build links in notification e-mails.
+  AdminEmail:
+    Type: String
+    Default: ''
+    Description: Optional e-mail of the first administrator (Cognito e-mails a temporary password).
+  AutoConfirmUsers:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Demo mode - confirm self-registered accounts without the e-mail code (set to false in production).
+  EnableMediaCdn:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Serve media through a CloudFront distribution (false = time-limited presigned S3 URLs).
+  MaxImageSizeMB:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 100
+  MaxVideoSizeMB:
+    Type: Number
+    Default: 200
+    MinValue: 1
+    MaxValue: 5000
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+  LambdaRoleArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional existing IAM role for every function (e.g. arn:aws:iam::<account>:role/LabRole on
+      AWS Academy). Leave empty to let SAM create one least-privilege role per function.
+
+Conditions:
+  HasLambdaRole: !Not [!Equals [!Ref LambdaRoleArn, '']]
+  HasAdminEmail: !Not [!Equals [!Ref AdminEmail, '']]
+  UseMediaCdn: !Equals [!Ref EnableMediaCdn, 'true']
+
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    Architectures: [arm64]
+    Handler: index.handler
+    MemorySize: 512
+    Timeout: 10
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: WARN
+      LogGroup: !Ref FunctionsLogGroup
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        TABLE_NAME: !Ref BlogTable
+        USER_POOL_ID: !Ref UserPool
+        USER_POOL_CLIENT_ID: !Ref UserPoolClient
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        APP_VERSION: '1.0.0'
+        NODE_OPTIONS: --enable-source-maps
+  Api:
+    OpenApiVersion: '3.0.1'
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Observability
+  # ---------------------------------------------------------------------------
+  FunctionsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------------------
+  # Data: single-table design (see docs/ARCHITECTURE.md)
+  # ---------------------------------------------------------------------------
+  BlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI2SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - allowComments
+              - altText
+              - authorEmail
+              - authorId
+              - authorName
+              - body
+              - commentCount
+              - commentId
+              - contentType
+              - coverImageUrl
+              - createdAt
+              - entityType
+              - excerpt
+              - filename
+              - kind
+              - mediaId
+              - moderatedAt
+              - moderatedBy
+              - ownerId
+              - ownerName
+              - parentId
+              - postId
+              - postTitle
+              - publishedAt
+              - readingTimeMinutes
+              - rejectionReason
+              - reviewNote
+              - s3Key
+              - size
+              - slug
+              - status
+              - submittedAt
+              - tag
+              - tags
+              - title
+              - updatedAt
+              - version
+        - IndexName: GSI2
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: GSI2SK, KeyType: RANGE }
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - allowComments
+              - altText
+              - authorId
+              - authorName
+              - commentCount
+              - contentType
+              - coverImageUrl
+              - createdAt
+              - entityType
+              - excerpt
+              - filename
+              - kind
+              - mediaId
+              - ownerId
+              - ownerName
+              - postId
+              - publishedAt
+              - readingTimeMinutes
+              - rejectionReason
+              - reviewNote
+              - s3Key
+              - size
+              - slug
+              - status
+              - submittedAt
+              - tags
+              - title
+              - updatedAt
+              - version
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - { Key: application, Value: blogify }
+
+  # ---------------------------------------------------------------------------
+  # Authentication: Amazon Cognito user pool + one group per role
+  # ---------------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-users
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration:
+        CaseSensitive: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - { Name: verified_email, Priority: 1 }
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageTemplate:
+          EmailSubject: Votre compte Blogify
+          EmailMessage: >-
+            Bienvenue sur Blogify ! Identifiant : {username} - mot de passe temporaire : {####}
+            (a changer a la premiere connexion via POST /auth/new-password).
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: Votre code de verification Blogify
+        EmailMessage: 'Votre code de verification Blogify est {####}'
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: [email]
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub ${AWS::StackName}-api-client
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admin
+      Precedence: 1
+      Description: Administrators - full access, user and role management
+
+  EditorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: editor
+      Precedence: 2
+      Description: Editors - review/publish every post, moderate comments, manage media
+
+  GuestAuthorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: guest-author
+      Precedence: 3
+      Description: Guest authors - write their own posts and submit them for review
+
+  BootstrapAdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Condition: HasAdminEmail
+    Properties:
+      UserPoolId: !Ref UserPool
+      Username: !Ref AdminEmail
+      DesiredDeliveryMediums: [EMAIL]
+      UserAttributes:
+        - { Name: email, Value: !Ref AdminEmail }
+        - { Name: email_verified, Value: 'true' }
+        - { Name: name, Value: Administrator }
+
+  BootstrapAdminMembership:
+    Type: AWS::Cognito::UserPoolUserToGroupAttachment
+    Condition: HasAdminEmail
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref AdminGroup
+      Username: !Ref BootstrapAdminUser
+
+  # ---------------------------------------------------------------------------
+  # Media: private S3 bucket (+ optional CloudFront distribution with OAC)
+  # ---------------------------------------------------------------------------
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, HEAD, POST, PUT]
+            AllowedOrigins: [!Ref AllowedOrigin]
+            AllowedHeaders: ['*']
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      Tags:
+        - { Key: application, Value: blogify }
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt MediaBucket.Arn
+              - !Sub ${MediaBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - !If
+            - UseMediaCdn
+            - Sid: AllowCloudFrontReadOnly
+              Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Sub ${MediaBucket.Arn}/media/*
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${MediaDistribution}
+            - !Ref AWS::NoValue
+
+  MediaOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Condition: UseMediaCdn
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-media-oac
+        Description: Blogify media bucket access from CloudFront
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  MediaDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseMediaCdn
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub Blogify media (${Stage})
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: media-bucket
+            DomainName: !GetAtt MediaBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt MediaOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: media-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # AWS managed policies: CachingOptimized + CORS-and-SecurityHeadersPolicy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: e61eb60c-9c35-4d20-a928-2b84e02af89c
+
+  # ---------------------------------------------------------------------------
+  # Notifications & asynchronous processing
+  # ---------------------------------------------------------------------------
+  NewPostTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Blogify
+      Tags:
+        - { Key: application, Value: blogify }
+
+  ProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # REST API (API Gateway) secured by a Lambda TOKEN authorizer (Cognito ID tokens)
+  # ---------------------------------------------------------------------------
+  BlogApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${AWS::StackName}-api
+      Description: Blogify headless blogging REST API
+      StageName: !Ref Stage
+      EndpointConfiguration:
+        Type: REGIONAL
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,If-Match'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+        MaxAge: "'600'"
+      Auth:
+        DefaultAuthorizer: CognitoTokenAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoTokenAuthorizer:
+            FunctionPayloadType: TOKEN
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Header: Authorization
+              ValidationExpression: '^([Bb]earer +)?[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+              ReauthorizeEvery: 300
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingRateLimit: 100
+          ThrottlingBurstLimit: 200
+        # Stricter limits on the endpoints most exposed to abuse.
+        - ResourcePath: '/~1auth~1register'
+          HttpMethod: POST
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - ResourcePath: '/~1auth~1login'
+          HttpMethod: POST
+          ThrottlingRateLimit: 10
+          ThrottlingBurstLimit: 20
+        - ResourcePath: '/~1auth~1forgot-password'
+          HttpMethod: POST
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 5
+        - ResourcePath: '/~1posts~1{postId}~1comments'
+          HttpMethod: POST
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - ResourcePath: '/~1subscriptions'
+          HttpMethod: POST
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 5
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"$context.error.responseType","message":$context.error.messageString},"requestId":"$context.requestId"}'
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"$context.error.responseType","message":$context.error.messageString},"requestId":"$context.requestId"}'
+        UNAUTHORIZED:
+          StatusCode: 401
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+              WWW-Authenticate: "'Bearer'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"UNAUTHORIZED","message":"Missing, invalid or expired token"},"requestId":"$context.requestId"}'
+        ACCESS_DENIED:
+          StatusCode: 403
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"FORBIDDEN","message":$context.error.messageString},"requestId":"$context.requestId"}'
+        THROTTLED:
+          StatusCode: 429
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"TOO_MANY_REQUESTS","message":"Rate limit exceeded, retry later"},"requestId":"$context.requestId"}'
+        MISSING_AUTHENTICATION_TOKEN:
+          StatusCode: 404
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,If-Match'"
+          ResponseTemplates:
+            application/json: '{"error":{"code":"ROUTE_NOT_FOUND","message":"No route for this method and path"},"requestId":"$context.requestId"}'
+      Tags:
+        application: blogify
+
+  # ---------------------------------------------------------------------------
+  # Lambda functions (one per bounded context, bundled by scripts/build.mjs)
+  # ---------------------------------------------------------------------------
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Lambda TOKEN authorizer - verifies Cognito ID tokens (JWKS cached)
+      CodeUri: dist/authorizer/
+      MemorySize: 256
+      Timeout: 5
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Authentication facade over Cognito (register, login, refresh, passwords)
+      CodeUri: dist/auth/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          AUTO_CONFIRM_USERS: !Ref AutoConfirmUsers
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminConfirmSignUp
+                - cognito-idp:AdminUpdateUserAttributes
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        Register:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/register, Method: POST, Auth: { Authorizer: NONE } }
+        Confirm:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/confirm, Method: POST, Auth: { Authorizer: NONE } }
+        ResendCode:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/resend-code, Method: POST, Auth: { Authorizer: NONE } }
+        Login:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/login, Method: POST, Auth: { Authorizer: NONE } }
+        Refresh:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/refresh, Method: POST, Auth: { Authorizer: NONE } }
+        NewPassword:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/new-password, Method: POST, Auth: { Authorizer: NONE } }
+        ForgotPassword:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/forgot-password, Method: POST, Auth: { Authorizer: NONE } }
+        ResetPassword:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/reset-password, Method: POST, Auth: { Authorizer: NONE } }
+        Logout:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /auth/logout, Method: POST, Auth: { Authorizer: NONE } }
+
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Profiles (/me, /authors) and administration of users and roles
+      CodeUri: dist/users/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminRemoveUserFromGroup
+                - cognito-idp:AdminListGroupsForUser
+                - cognito-idp:AdminEnableUser
+                - cognito-idp:AdminDisableUser
+                - cognito-idp:AdminUserGlobalSignOut
+                - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:ListUsers
+                - cognito-idp:ListUsersInGroup
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        GetMe:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /me, Method: GET }
+        UpdateMe:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /me, Method: PATCH }
+        GetAuthor:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/authors/{userId}', Method: GET, Auth: { Authorizer: NONE } }
+        ListUsers:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /users, Method: GET }
+        InviteUser:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /users, Method: POST }
+        UpdateUser:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/users/{userId}', Method: PATCH }
+
+  PostsQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Read side of posts (public delivery API, read-only permissions)
+      CodeUri: dist/posts-query/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref BlogTable
+      Events:
+        ListPosts:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /posts, Method: GET, Auth: { Authorizer: NONE } }
+        GetPost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}', Method: GET, Auth: { Authorizer: NONE } }
+
+  PostsCommandFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Write side of posts (CRUD and editorial workflow)
+      CodeUri: dist/posts-command/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+      Events:
+        CreatePost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /posts, Method: POST }
+        UpdatePost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}', Method: PATCH }
+        DeletePost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}', Method: DELETE }
+        SubmitPost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/submit', Method: POST }
+        PublishPost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/publish', Method: POST }
+        UnpublishPost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/unpublish', Method: POST }
+        RejectPost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/reject', Method: POST }
+        ArchivePost:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/archive', Method: POST }
+
+  CommentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Reader comments and moderation
+      CodeUri: dist/comments/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+      Events:
+        ListComments:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/comments', Method: GET, Auth: { Authorizer: NONE } }
+        CreateComment:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/comments', Method: POST, Auth: { Authorizer: NONE } }
+        ModerateComment:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/comments/{commentId}', Method: PATCH }
+        DeleteComment:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/posts/{postId}/comments/{commentId}', Method: DELETE }
+        ModerationQueue:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /comments, Method: GET }
+
+  MediaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Media library - presigned S3 uploads and retrieval
+      CodeUri: dist/media/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          MEDIA_BUCKET: !Ref MediaBucket
+          MEDIA_CDN_DOMAIN: !If [UseMediaCdn, !GetAtt MediaDistribution.DomainName, '']
+          MAX_IMAGE_MB: !Ref MaxImageSizeMB
+          MAX_VIDEO_MB: !Ref MaxVideoSizeMB
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Events:
+        RequestUpload:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /media, Method: POST }
+        ListMedia:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /media, Method: GET }
+        GetMedia:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/media/{mediaId}', Method: GET, Auth: { Authorizer: NONE } }
+        UpdateMedia:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/media/{mediaId}', Method: PATCH }
+        DeleteMedia:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: '/media/{mediaId}', Method: DELETE }
+
+  MediaProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Validates uploaded media (size, MIME type, magic bytes) on S3 Object Created events
+      CodeUri: dist/media-processor/
+      Timeout: 30
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          MEDIA_BUCKET: !Ref MediaBucket
+          MAX_IMAGE_MB: !Ref MaxImageSizeMB
+          MAX_VIDEO_MB: !Ref MaxVideoSizeMB
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Events:
+        MediaUploaded:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.s3]
+              detail-type: [Object Created]
+              detail:
+                bucket:
+                  name: [!Ref MediaBucket]
+                object:
+                  key: [{ prefix: media/ }]
+            RetryPolicy:
+              MaximumRetryAttempts: 3
+              MaximumEventAgeInSeconds: 3600
+            DeadLetterConfig:
+              Arn: !GetAtt ProcessingDLQ.Arn
+
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Full-text search and tag listing (read-only)
+      CodeUri: dist/search/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref BlogTable
+      Events:
+        Search:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /search, Method: GET, Auth: { Authorizer: NONE } }
+        ListTags:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /tags, Method: GET, Auth: { Authorizer: NONE } }
+
+  SubscriptionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Newsletter subscriptions (Amazon SNS e-mail with double opt-in)
+      CodeUri: dist/subscriptions/
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref NewPostTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Subscribe
+                - sns:ListSubscriptionsByTopic
+              Resource: !Ref NewPostTopic
+      Events:
+        Subscribe:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /subscriptions, Method: POST, Auth: { Authorizer: NONE } }
+        ListSubscriptions:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /subscriptions, Method: GET }
+
+  ProjectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: DynamoDB Streams consumer - maintains tag and search indexes, cascades post deletions
+      CodeUri: dist/projector/
+      Timeout: 60
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ProcessingDLQ.QueueName
+      Events:
+        PostChanges:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt BlogTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 25
+            MaximumBatchingWindowInSeconds: 1
+            MaximumRetryAttempts: 5
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt ProcessingDLQ.Arn
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"dynamodb": {"Keys": {"SK": {"S": ["POST"]}}}}'
+
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: DynamoDB Streams consumer - notifies subscribers (SNS) and integrations (EventBridge) of new posts
+      CodeUri: dist/notifier/
+      Timeout: 30
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref NewPostTopic
+          EVENT_BUS_NAME: default
+          PUBLIC_SITE_URL: !Ref PublicSiteUrl
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NewPostTopic.TopicName
+        - EventBridgePutEventsPolicy:
+            EventBusName: default
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ProcessingDLQ.QueueName
+      Events:
+        PostPublished:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt BlogTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+            MaximumRetryAttempts: 5
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt ProcessingDLQ.Arn
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT", "MODIFY"], "dynamodb": {"Keys": {"SK": {"S": ["POST"]}}, "NewImage": {"status": {"S": ["published"]}}}}'
+
+  DocsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Interactive API documentation (Swagger UI), OpenAPI document and health check
+      CodeUri: dist/docs/
+      MemorySize: 256
+      Role: !If [HasLambdaRole, !Ref LambdaRoleArn, !Ref AWS::NoValue]
+      Events:
+        SwaggerUi:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /docs, Method: GET, Auth: { Authorizer: NONE } }
+        OpenApi:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /openapi.json, Method: GET, Auth: { Authorizer: NONE } }
+        Health:
+          Type: Api
+          Properties: { RestApiId: !Ref BlogApi, Path: /health, Method: GET, Auth: { Authorizer: NONE } }
+
+  ProcessingDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref ProcessingDLQ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeDeadLetters
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ProcessingDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt MediaProcessorFunctionMediaUploaded.Arn
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the REST API
+    Value: !Sub https://${BlogApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  DocsUrl:
+    Description: Interactive API documentation (Swagger UI)
+    Value: !Sub https://${BlogApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/docs
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  TableName:
+    Value: !Ref BlogTable
+  MediaBucketName:
+    Value: !Ref MediaBucket
+  MediaCdnDomain:
+    Condition: UseMediaCdn
+    Value: !GetAtt MediaDistribution.DomainName
+  NewPostTopicArn:
+    Value: !Ref NewPostTopic
+  ProcessingDLQUrl:
+    Value: !Ref ProcessingDLQ

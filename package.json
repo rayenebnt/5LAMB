@@ -1,0 +1,45 @@
+{
+  "name": "blogify-headless-cms",
+  "version": "1.0.0",
+  "description": "Blogify - plateforme de blogging headless (serverless) sur AWS Lambda, API Gateway, DynamoDB, S3 et Cognito",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-concurrency=1 \"tests/unit/**/*.test.mjs\"",
+    "test:integration": "node --test --test-concurrency=1 \"tests/integration/**/*.test.mjs\"",
+    "test:all": "npm test && npm run test:integration",
+    "coverage": "node --test --experimental-test-coverage --test-concurrency=1 \"tests/unit/**/*.test.mjs\"",
+    "ddb:start": "docker run -d --rm --name blogify-dynamodb -p 8000:8000 amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -sharedDb",
+    "ddb:stop": "docker stop blogify-dynamodb",
+    "validate": "sam validate --lint",
+    "deploy": "npm run build && sam deploy",
+    "deploy:guided": "npm run build && sam deploy --guided",
+    "smoke": "node scripts/smoke-test.mjs",
+    "bootstrap-admin": "node scripts/bootstrap-admin.mjs",
+    "zip": "node scripts/make-zip.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "3.1158.0",
+    "@aws-sdk/client-dynamodb": "3.1158.0",
+    "@aws-sdk/client-eventbridge": "3.1158.0",
+    "@aws-sdk/client-s3": "3.1158.0",
+    "@aws-sdk/client-sns": "3.1158.0",
+    "@aws-sdk/lib-dynamodb": "3.1158.0",
+    "@aws-sdk/s3-presigned-post": "3.1158.0",
+    "@aws-sdk/s3-request-presigner": "3.1158.0",
+    "@aws-sdk/util-dynamodb": "3.996.9",
+    "aws-jwt-verify": "5.2.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb-streams": "3.1158.0",
+    "aws-sdk-client-mock": "4.1.0",
+    "esbuild": "0.28.2",
+    "yaml": "2.9.1"
+  }
+}
