@@ -446,6 +446,7 @@ Resources:
       EndpointConfiguration:
         Type: REGIONAL
       TracingEnabled: true
+      MinimumCompressionSize: 1024
       Cors:
         AllowMethods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization,If-Match'"
