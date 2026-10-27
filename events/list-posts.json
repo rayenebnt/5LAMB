@@ -1,0 +1,11 @@
+{
+  "resource": "/posts",
+  "path": "/posts",
+  "httpMethod": "GET",
+  "headers": { "Accept": "application/json" },
+  "queryStringParameters": { "limit": "5" },
+  "pathParameters": null,
+  "requestContext": { "requestId": "local-list-posts", "stage": "dev", "resourcePath": "/posts", "httpMethod": "GET" },
+  "body": null,
+  "isBase64Encoded": false
+}

@@ -1,0 +1,23 @@
+{
+  "version": "0",
+  "id": "17793124-05d4-b198-2fde-7ededc63b103",
+  "detail-type": "Object Created",
+  "source": "aws.s3",
+  "account": "123456789012",
+  "time": "2026-10-27T10:00:00Z",
+  "region": "eu-west-3",
+  "resources": ["arn:aws:s3:::blogify-local-media"],
+  "detail": {
+    "version": "0",
+    "bucket": { "name": "blogify-local-media" },
+    "object": {
+      "key": "media/0192f5a1-7c2b-7d3e-8f40-123456789abc/photo.png",
+      "size": 2048,
+      "etag": "b1946ac92492d2347c6235b4d2611184",
+      "sequencer": "00617F08299329D189"
+    },
+    "request-id": "N4N7GDK58NMKJ12R",
+    "requester": "123456789012",
+    "reason": "PostObject"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "Records": [
+    {
+      "eventID": "1",
+      "eventName": "MODIFY",
+      "eventVersion": "1.1",
+      "eventSource": "aws:dynamodb",
+      "awsRegion": "eu-west-3",
+      "dynamodb": {
+        "Keys": { "PK": { "S": "POST#0192f5a1-7c2b-7d3e-8f40-000000000001" }, "SK": { "S": "POST" } },
+        "OldImage": {
+          "PK": { "S": "POST#0192f5a1-7c2b-7d3e-8f40-000000000001" }, "SK": { "S": "POST" },
+          "entityType": { "S": "POST" }, "postId": { "S": "0192f5a1-7c2b-7d3e-8f40-000000000001" },
+          "slug": { "S": "architecture-serverless" }, "title": { "S": "Architecture serverless" },
+          "content": { "S": "Lambda, API Gateway et DynamoDB." }, "excerpt": { "S": "Lambda, API Gateway et DynamoDB." },
+          "tags": { "L": [{ "S": "aws" }, { "S": "serverless" }] }, "status": { "S": "in_review" },
+          "authorId": { "S": "33333333-3333-4333-8333-333333333333" }, "authorName": { "S": "Auteur Invité" },
+          "createdAt": { "S": "2026-10-27T09:00:00.000Z" }, "updatedAt": { "S": "2026-10-27T09:30:00.000Z" },
+          "readingTimeMinutes": { "N": "1" }, "commentCount": { "N": "0" }, "allowComments": { "BOOL": true },
+          "version": { "N": "2" }
+        },
+        "NewImage": {
+          "PK": { "S": "POST#0192f5a1-7c2b-7d3e-8f40-000000000001" }, "SK": { "S": "POST" },
+          "entityType": { "S": "POST" }, "postId": { "S": "0192f5a1-7c2b-7d3e-8f40-000000000001" },
+          "slug": { "S": "architecture-serverless" }, "title": { "S": "Architecture serverless" },
+          "content": { "S": "Lambda, API Gateway et DynamoDB." }, "excerpt": { "S": "Lambda, API Gateway et DynamoDB." },
+          "tags": { "L": [{ "S": "aws" }, { "S": "serverless" }] }, "status": { "S": "published" },
+          "authorId": { "S": "33333333-3333-4333-8333-333333333333" }, "authorName": { "S": "Auteur Invité" },
+          "createdAt": { "S": "2026-10-27T09:00:00.000Z" }, "updatedAt": { "S": "2026-10-27T10:00:00.000Z" },
+          "publishedAt": { "S": "2026-10-27T10:00:00.000Z" },
+          "readingTimeMinutes": { "N": "1" }, "commentCount": { "N": "0" }, "allowComments": { "BOOL": true },
+          "version": { "N": "3" }
+        },
+        "SequenceNumber": "111",
+        "SizeBytes": 512,
+        "StreamViewType": "NEW_AND_OLD_IMAGES"
+      },
+      "eventSourceARN": "arn:aws:dynamodb:eu-west-3:123456789012:table/blogify-local/stream/2026-10-27T00:00:00.000"
+    }
+  ]
+}

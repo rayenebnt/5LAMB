@@ -1,0 +1,23 @@
+{
+  "resource": "/posts",
+  "path": "/posts",
+  "httpMethod": "POST",
+  "headers": { "Content-Type": "application/json" },
+  "queryStringParameters": null,
+  "pathParameters": null,
+  "requestContext": {
+    "requestId": "local-create-post",
+    "stage": "dev",
+    "resourcePath": "/posts",
+    "httpMethod": "POST",
+    "authorizer": {
+      "principalId": "33333333-3333-4333-8333-333333333333",
+      "userId": "33333333-3333-4333-8333-333333333333",
+      "email": "auteur@example.com",
+      "name": "Auteur Invité",
+      "roles": "guest-author"
+    }
+  },
+  "body": "{\"title\":\"Mon premier article serverless\",\"content\":\"# Bonjour\\n\\nCet article est stocké dans **DynamoDB**.\",\"tags\":[\"aws\",\"serverless\"]}",
+  "isBase64Encoded": false
+}
