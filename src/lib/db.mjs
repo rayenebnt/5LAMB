@@ -199,7 +199,11 @@ export async function queryPage({
     exclusiveStartKey = lastEvaluatedKey;
   } while (items.length < limit && lastEvaluatedKey && rounds < maxRounds);
 
-  return { items, nextCursor: encodeCursor(lastEvaluatedKey) };
+  if (!lastEvaluatedKey) return { items, nextCursor: null };
+  // With a filter, LastEvaluatedKey may be an item the caller must not see (e.g. a pending
+  // comment): resume after the last returned item instead, when there is one.
+  const resumeKey = filter && items.length ? cursorFromItem(items[items.length - 1], indexName) : lastEvaluatedKey;
+  return { items, nextCursor: encodeCursor(resumeKey) };
 }
 
 /** Reads every item of a query (all pages), up to `maxItems`. */

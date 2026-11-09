@@ -56,9 +56,13 @@ export function redirect(location, statusCode = 302, headers = {}) {
 
 /** Cache headers for public GET responses (CDN / browser caching). */
 export function cacheHeaders(identity, maxAgeSeconds = 60) {
+  // Vary: Authorization prevents a cache from serving an anonymous response to a signed-in caller.
   return identity
-    ? { 'Cache-Control': 'private, no-store' }
-    : { 'Cache-Control': `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${maxAgeSeconds * 5}` };
+    ? { 'Cache-Control': 'private, no-store', Vary: 'Authorization' }
+    : {
+        'Cache-Control': `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${maxAgeSeconds * 5}`,
+        Vary: 'Authorization',
+      };
 }
 
 /** Strong ETag derived from an item version number. */
