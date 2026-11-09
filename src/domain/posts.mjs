@@ -30,6 +30,7 @@ import {
   validationError,
 } from '../lib/errors.mjs';
 import { isUuid, nowIso, uuidv7 } from '../lib/ids.mjs';
+import { logger } from '../lib/logger.mjs';
 import { ENTITY, POST_STATUS } from '../lib/schema.mjs';
 import {
   makeExcerpt,
@@ -44,6 +45,7 @@ import { canViewPost, getPostIdBySlug, getPostItem } from './post-access.mjs';
 
 const { DRAFT, IN_REVIEW, PUBLISHED, ARCHIVED } = POST_STATUS;
 
+/** Maximum slug length (custom slugs are validated against it, automatic ones are cut to it). */
 export const SLUG_MAX_LENGTH = 80;
 
 /** Statuses in which authors without POST_UPDATE_ANY / POST_DELETE_ANY may still change their post. */
@@ -196,7 +198,12 @@ export function* autoSlugCandidates(title, random = randomHex) {
 
 /**
  * New draft item from a validated creation input.
- * @param {{ postId: string, slug: string, input: object, author: { userId: string, name: string }, now: string }} params
+ * @param {object} params
+ * @param {string} params.postId
+ * @param {string} params.slug
+ * @param {object} params.input createPostSchema output
+ * @param {{ userId: string, name: string }} params.author caller identity
+ * @param {string} params.now ISO timestamp used for createdAt / updatedAt
  */
 export function buildPostItem({ postId, slug, input, author, now }) {
   const content = input.content ?? '';
@@ -559,7 +566,7 @@ export async function updatePost(identity, postId, patch, { ifMatch } = {}) {
  * search terms are removed asynchronously by the projector (stream REMOVE event).
  */
 export async function deletePost(identity, postId, { ifMatch } = {}) {
-  await withOptimisticLock(ifMatch, async () => {
+  return withOptimisticLock(ifMatch, async () => {
     const post = await readPostForWrite(identity, postId);
     assertCanModify(identity, post, {
       own: PERMISSIONS.POST_DELETE_OWN,
@@ -589,6 +596,7 @@ export async function deletePost(identity, postId, { ifMatch } = {}) {
       if (cancellationReasons(err).includes('ConditionalCheckFailed')) throw new VersionConflict();
       throw concurrencyError(err);
     }
+    logger.info('Post deleted', { postId: post.postId, status: post.status, by: identity.userId });
   });
 }
 
@@ -599,19 +607,29 @@ export async function deletePost(identity, postId, { ifMatch } = {}) {
  * @returns {Promise<object>} the updated item
  */
 export async function transitionPost(identity, postId, action, { note, ifMatch } = {}) {
+  if (!Object.hasOwn(WORKFLOW, action)) throw new Error(`Unknown workflow action '${action}'`);
   const rule = WORKFLOW[action];
-  if (!rule) throw new Error(`Unknown workflow action '${action}'`);
   return withOptimisticLock(ifMatch, async () => {
     const post = await readPostForWrite(identity, postId);
     if (!canTransition(identity, post, action)) {
       throw forbidden(
-        action === 'submit' ? 'Only the author or an editor can submit this post' : `Only editors can ${action} posts`,
+        action === 'submit'
+          ? 'Only the author or an editor can submit this post'
+          : `Only editors can ${action} posts`,
       );
     }
     assertVersion(post, ifMatch);
     if (!rule.from.includes(post.status)) {
       throw conflict(`Cannot ${action} a post whose status is '${post.status}'`, 'INVALID_STATE_TRANSITION');
     }
-    return updatePostItem(post, transitionChanges(post, action, { note, now: nowIso() }));
+    const updated = await updatePostItem(post, transitionChanges(post, action, { note, now: nowIso() }));
+    logger.info('Post workflow transition', {
+      postId: post.postId,
+      action,
+      from: post.status,
+      to: updated.status,
+      by: identity.userId,
+    });
+    return updated;
   });
 }

@@ -18,7 +18,10 @@ let eventBridgeClient;
 export function dynamo() {
   if (!documentClient) {
     const endpoint = config.dynamodbEndpoint;
-    const client = new DynamoDBClient(endpoint ? { endpoint } : {});
+    // A local endpoint (DynamoDB Local) never needs real credentials; it rejects some real ones.
+    const client = new DynamoDBClient(
+      endpoint ? { endpoint, credentials: { accessKeyId: 'local', secretAccessKey: 'local' } } : {},
+    );
     documentClient = DynamoDBDocumentClient.from(client, {
       marshallOptions: { removeUndefinedValues: true },
     });

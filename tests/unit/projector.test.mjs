@@ -3,7 +3,7 @@ import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { mockClient } from 'aws-sdk-client-mock';
-import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
   BatchWriteCommand,
   DynamoDBDocumentClient,
@@ -13,9 +13,9 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import { indexKeys, keys } from '../../src/lib/db.mjs';
-import { computeSearchTerms } from '../../src/domain/search.mjs';
-import { tagMembershipItem } from '../../src/domain/tags.mjs';
-import { handler } from '../../src/functions/projector/index.mjs';
+import { computeSearchTerms, searchTermItem } from '../../src/domain/search.mjs';
+import { postTags, tagMembershipItem } from '../../src/domain/tags.mjs';
+import { handler, hasRelevantChange } from '../../src/functions/projector/index.mjs';
 import { handler as searchApi } from '../../src/functions/search/index.mjs';
 import { apiEvent, parse, users } from '../helpers/events.mjs';
 
@@ -125,7 +125,9 @@ class FakeTable {
   put(input) {
     this.#maybeFail('Put', input);
     assert.equal(input.TableName, process.env.TABLE_NAME);
-    assert.equal(input.ConditionExpression, undefined);
+    if (!this.#conditionHolds(input.ConditionExpression, input.Item)) {
+      throw new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
+    }
     this.#store(input.Item);
     return {};
   }
@@ -266,21 +268,28 @@ const membership = (tag, postId = POST_ID) => table.get(keys.tagPost(tag, postId
 const termsOf = (postId) =>
   Object.fromEntries(table.ofType('TERM').filter((item) => item.postId === postId).map((item) => [item.term, item.score]));
 
-/** Asserts that the projections exactly reflect the given current post versions. */
+const sortByKey = (items) => items.map(withoutUndefined).sort((a, b) => compare(itemKey(a), itemKey(b)));
+
+/**
+ * Asserts that the projections exactly reflect the current versions of the posts: one membership
+ * per tag of each published post (with its latest summary), one term item per indexed term, and
+ * counters equal to the number of memberships (zero counters may remain, negative ones may not).
+ */
 function assertProjectionsMatch(currentPosts) {
   const published = currentPosts.filter((post) => post.status === 'published');
-  const expectedMemberships = published.flatMap((post) => post.tags.map((tag) => tagMembershipItem(post, tag)));
-  const sortByKey = (items) => [...items].sort((a, b) => compare(itemKey(a), itemKey(b)));
-  assert.deepEqual(sortByKey(table.ofType('TAG_POST')), sortByKey(expectedMemberships));
+  const memberships = published.flatMap((post) => postTags(post).map((tag) => tagMembershipItem(post, tag)));
+  const terms = published.flatMap((post) =>
+    [...computeSearchTerms(post)].map(([term, score]) => searchTermItem(post, term, score)),
+  );
+  assert.deepEqual(sortByKey(table.ofType('TAG_POST')), sortByKey(memberships), 'memberships');
+  assert.deepEqual(sortByKey(table.ofType('TERM')), sortByKey(terms), 'search terms');
 
-  for (const item of table.ofType('TAG')) {
-    const expected = expectedMemberships.filter((m) => m.tag === item.tag).length;
-    assert.equal(item.postCount, expected, `counter of ${item.tag}`);
-  }
-  for (const post of currentPosts) {
-    const expected = post.status === 'published' ? Object.fromEntries(computeSearchTerms(post)) : {};
-    assert.deepEqual(termsOf(post.postId), expected, `terms of ${post.postId}`);
-  }
+  const expectedCounts = {};
+  for (const { tag } of memberships) expectedCounts[tag] = (expectedCounts[tag] ?? 0) + 1;
+  const counts = Object.fromEntries(
+    table.ofType('TAG').filter((c) => c.postCount !== 0).map((c) => [c.tag, c.postCount]),
+  );
+  assert.deepEqual(counts, expectedCounts, 'tag counters');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -345,7 +354,18 @@ describe('projector: publication lifecycle', () => {
     assert.equal(update.Update.ExpressionAttributeValues[':delta'], 1);
 
     ddb.resetHistory();
-    await project(modify(postItem(), draft({ version: 4 })));
+    const edited = postItem({ title: 'Titre modifié', version: 4 });
+    await project(modify(postItem(), edited));
+    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 0, 'kept tags do not touch the counters');
+    const refreshes = ddb.commandCalls(PutCommand).map((call) => call.args[0].input);
+    assert.deepEqual(refreshes.map((input) => [input.Item.PK, input.Item.title]), [
+      ['TAG#aws', 'Titre modifié'],
+      ['TAG#serverless', 'Titre modifié'],
+    ]);
+    assert.ok(refreshes.every((input) => input.ConditionExpression === 'attribute_exists(PK)'));
+
+    ddb.resetHistory();
+    await project(modify(edited, draft({ version: 5 })));
     const [del, decrement] = ddb.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems;
     assert.deepEqual(del.Delete.Key, { PK: 'TAG#aws', SK: `POST#${POST_ID}` });
     assert.equal(del.Delete.ConditionExpression, 'attribute_exists(PK)');
@@ -486,9 +506,29 @@ describe('projector: at-least-once delivery and failures', () => {
     assertProjectionsMatch([unpublished]);
     assert.equal(counter('aws').postCount, 0);
 
-    const remove1 = remove(unpublished);
-    await project(remove1, remove1);
+    const deletion = remove(unpublished);
+    await project(deletion, deletion);
     assert.equal(counter('aws').postCount, 0);
+  });
+
+  test('a batch delivered again after being processed leaves no negative counter', async () => {
+    const published = postItem();
+    const edited = postItem({ title: 'Titre modifié', version: 4 });
+    const unpublished = draft({ title: 'Titre modifié', version: 5 });
+    const records = [modify(draft(), published), modify(published, edited), modify(edited, unpublished)];
+    await project(...records);
+
+    // e.g. the invocation timed out after processing the batch [edit, unpublish]: it is retried.
+    await project(...records.slice(1));
+    assertProjectionsMatch([unpublished]);
+    assert.deepEqual(table.ofType('TAG').map((c) => [c.tag, c.postCount]), [['aws', 0], ['serverless', 0]]);
+  });
+
+  test('a kept tag whose membership is missing is restored and counted', async () => {
+    const edited = postItem({ title: 'Titre modifié', version: 4 });
+    await project(modify(postItem(), edited));
+    assertProjectionsMatch([edited]);
+    assert.equal(counter('aws').postCount, 1);
   });
 
   test('a record that failed half-way is completed when retried', async () => {
@@ -543,22 +583,26 @@ describe('projector: at-least-once delivery and failures', () => {
     assert.equal(ddb.calls().length, 0);
   });
 
-  test('replaying any suffix of a random history converges to the same projections', async () => {
-    const random = mulberry32(20261027);
-    const { records, current } = randomHistory(random, 60);
+  for (const seed of [7, 1234, 99]) {
+    test(`replaying any suffix of a random history converges to the same projections (seed ${seed})`, async () => {
+      const random = mulberry32(seed);
+      const { records, projected } = randomHistory(random, 120);
 
-    await project(...records);
-    assertProjectionsMatch(current);
-    const reference = table.snapshot();
+      await project(...records);
+      assertProjectionsMatch(projected);
+      assert.ok(table.ofType('TAG_POST').length > 0, 'the history ends with published posts');
+      const reference = table.snapshot();
 
-    for (let replay = 0; replay < 15; replay += 1) {
-      const from = Math.floor(random() * records.length);
-      await project(...records.slice(from));
-      assert.deepEqual(table.snapshot(), reference, `replay from record ${from}`);
-    }
-    await project(...records);
-    assert.deepEqual(table.snapshot(), reference, 'full replay');
-  });
+      // Lambda retries a batch from its first record, possibly after it was (partly) processed.
+      for (let replay = 0; replay < 20; replay += 1) {
+        const from = Math.floor(random() * records.length);
+        await project(...records.slice(from));
+        assert.deepEqual(table.snapshot(), reference, `replay from record ${from}`);
+      }
+      await project(...records);
+      assert.deepEqual(table.snapshot(), reference, 'full replay');
+    });
+  }
 });
 
 describe('projector: projections are readable by the search API', () => {
@@ -632,29 +676,33 @@ function mulberry32(seed) {
 const TAG_POOL = ['aws', 'lambda', 'serverless', 'dynamodb', 'e-commerce'];
 const WORDS = ['cloud', 'lambda', 'table', 'index', 'stream', 'queue', 'cache', 'api', 'edge', 'events'];
 
-/** Interleaved versions of three posts (publish, unpublish, retag, edit, comment, delete). */
+/**
+ * Interleaved stream records of four posts (publish, unpublish, retag, edit, comment and, near the
+ * end, delete), and the version of each post that the projections must reflect: its last version
+ * with a relevant change (comment counter updates alone are not re-projected).
+ */
 function randomHistory(random, steps) {
   const pick = (list) => list[Math.floor(random() * list.length)];
   const sample = (list, max) => list.filter(() => random() < max / list.length);
-  const current = ['01', '02', '03'].map((n) =>
+  const current = ['01', '02', '03', '04'].map((n) =>
     draft({ postId: `0192f5a1-7c2b-7d3e-8f40-0000000000${n}`, slug: `post-${n}`, tags: sample(TAG_POOL, 2) }),
   );
   const records = current.map((post) => insert(post));
-  const live = new Set(current.map((post) => post.postId));
+  const projected = [...current];
 
   for (let step = 1; step <= steps; step += 1) {
     const index = Math.floor(random() * current.length);
     const before = current[index];
-    if (!live.has(before.postId)) continue;
-    const date = new Date(Date.UTC(2026, 9, 27, 10, step)).toISOString();
-    const action = pick(['publish', 'publish', 'unpublish', 'retag', 'edit', 'edit', 'comment', 'delete']);
-    if (action === 'delete' && random() < 0.5) continue; // keep deletions rare
+    if (before.status === 'deleted') continue;
+    const action = pick(['publish', 'publish', 'unpublish', 'retag', 'retag', 'retag', 'edit', 'edit', 'comment', 'delete']);
     if (action === 'delete') {
+      if (step < steps * 0.9) continue; // deletions only happen at the end
       records.push(remove(before));
-      live.delete(before.postId);
       current[index] = { ...before, status: 'deleted' };
+      projected[index] = current[index];
       continue;
     }
+    const date = new Date(Date.UTC(2026, 9, 27, 10, step)).toISOString();
     const after = { ...before, version: before.version + 1, updatedAt: date };
     if (action === 'publish') Object.assign(after, { status: 'published', publishedAt: before.publishedAt ?? date });
     if (action === 'unpublish') after.status = 'draft';
@@ -667,6 +715,7 @@ function randomHistory(random, steps) {
     if (action === 'comment') after.commentCount += 1;
     records.push(modify(before, after));
     current[index] = after;
+    if (hasRelevantChange(before, after)) projected[index] = after;
   }
-  return { records, current };
+  return { records, projected };
 }

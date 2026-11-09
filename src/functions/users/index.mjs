@@ -46,7 +46,9 @@ const updateMeSchema = requireAtLeastOneField(
 
 const listUsersQuery = z.strictObject({
   limit: schemas.limit(60, 20),
-  cursor: schemas.cursor,
+  // Wraps a Cognito pagination token, whose length is not bounded by the Cognito API:
+  // allow more room than the DynamoDB cursors of schemas.cursor.
+  cursor: z.string().min(1).max(4096).optional(),
   role: role.optional(),
 });
 

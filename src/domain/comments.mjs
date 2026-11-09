@@ -268,7 +268,7 @@ export async function createComment(identity, postId, input) {
     await dynamo().send(new PutCommand(put));
   }
   if (status === COMMENT_STATUS.SPAM) {
-    logger.warn('Comment classified as spam (honeypot field filled)', { postId, commentId });
+    logger.info('Comment classified as spam (honeypot field filled)', { postId, commentId });
   }
   return item;
 }

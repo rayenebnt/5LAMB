@@ -29,14 +29,17 @@ const clientConfig = {
 export const rawClient = new DynamoDBClient(clientConfig);
 const streamsClient = new DynamoDBStreamsClient(clientConfig);
 
-/** True when DynamoDB Local answers on ENDPOINT. */
-export async function isDynamoLocalAvailable() {
-  try {
-    await rawClient.send(new ListTablesCommand({ Limit: 1 }));
-    return true;
-  } catch {
-    return false;
+/** True when DynamoDB Local answers on ENDPOINT (retries while the container starts). */
+export async function isDynamoLocalAvailable({ attempts = 5, delayMs = 1000 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await rawClient.send(new ListTablesCommand({ Limit: 1 }));
+      return true;
+    } catch {
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
+  return false;
 }
 
 /** Creates a table with the schema of BlogTable in template.yaml. */

@@ -23,16 +23,16 @@ import {
 const postParamsSchema = z.strictObject({ postId: schemas.uuid });
 const commentParamsSchema = z.strictObject({ postId: schemas.uuid, commentId: schemas.uuid });
 
+const pageFields = { limit: schemas.limit(100, 20), cursor: schemas.cursor };
+
 const listQuerySchema = z.strictObject({
   status: z.enum([...Object.values(COMMENT_STATUS), ALL_STATUSES]).default(COMMENT_STATUS.APPROVED),
-  limit: schemas.limit(100, 20),
-  cursor: schemas.cursor,
+  ...pageFields,
 });
 
 const queueQuerySchema = z.strictObject({
   status: z.enum(Object.values(COMMENT_STATUS)).default(COMMENT_STATUS.PENDING),
-  limit: schemas.limit(100, 20),
-  cursor: schemas.cursor,
+  ...pageFields,
 });
 
 const moderationSchema = z.strictObject({ status: z.enum(MODERATION_STATUSES) });
@@ -51,11 +51,15 @@ const commentFields = {
   website: z.string().nullable().optional(),
 };
 
+/** Explicit message when the name is missing (other type errors keep zod's default message). */
+const nameRequired = (issue) =>
+  issue.input === undefined ? 'authorName is required for anonymous comments' : undefined;
+
 /** Anonymous readers sign their comment; the e-mail address is optional and never published. */
 const anonymousCommentSchema = z.strictObject({
   ...commentFields,
   authorName: z
-    .string({ error: (issue) => (issue.input === undefined ? 'authorName is required for anonymous comments' : undefined) })
+    .string({ error: nameRequired })
     .trim()
     .min(1, 'authorName must not be empty')
     .max(80, 'authorName must not exceed 80 characters'),
@@ -84,7 +88,8 @@ async function listForPost(req) {
   const query = validate(listQuerySchema, req.query);
   const page = await listPostComments(req.identity, postId, query);
   const moderator = can(req.identity, PERMISSIONS.COMMENT_MODERATE);
-  return ok(toPage(page, moderator), cacheHeaders(req.identity));
+  // Anonymous responses are cacheable: a signed-in request of the same URL must not reuse them.
+  return ok(toPage(page, moderator), { ...cacheHeaders(req.identity), Vary: 'Authorization' });
 }
 
 /** POST /posts/{postId}/comments - anonymous or signed-in comment, optionally replying to another. */

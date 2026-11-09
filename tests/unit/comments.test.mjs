@@ -182,6 +182,7 @@ describe('GET /posts/{postId}/comments', () => {
     });
     assert.ok(!res.body.includes('@example.com'), 'e-mail addresses must never be public');
     assert.match(res.headers['Cache-Control'], /^public/);
+    assert.equal(res.headers.Vary, 'Authorization', 'cached anonymous lists are not reused for signed-in readers');
 
     const [query] = inputs(QueryCommand);
     assert.equal(query.TableName, 'blogify-test');

@@ -279,7 +279,12 @@ describe('GET /posts', () => {
   test('guest authors list their own unpublished posts only', async () => {
     ddb.on(QueryCommand).resolves({ Items: [summaryItem(1, { status: 'draft' })] });
     const token = tokenOf(users.author);
-    for (const query of [{ status: 'draft' }, { status: 'draft', author: 'me' }, { status: 'draft', author: users.author.userId }]) {
+    const ownListings = [
+      { status: 'draft' },
+      { status: 'draft', author: 'me' },
+      { status: 'draft', author: users.author.userId },
+    ];
+    for (const query of ownListings) {
       const res = await list(query, { token });
       assert.equal(res.statusCode, 200, res.body);
       assert.equal(res.headers['Cache-Control'], NO_STORE);

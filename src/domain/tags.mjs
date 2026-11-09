@@ -5,14 +5,15 @@
 //
 // The stream is delivered at least once, so a counter is only ever changed in the same transaction
 // as the creation or deletion of the membership item it counts, guarded by a condition on that
-// item: replaying a record can neither count a post twice nor decrement a counter twice.
+// item, and a membership is never written without being counted. Each operation thus keeps
+// "counter = number of memberships", whatever records are replayed and in whatever order.
 
 import { PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { dynamo } from '../lib/aws.mjs';
 import {
-  batchWriteAll,
   cancellationReasons,
   indexKeys,
+  isConditionalCheckFailed,
   isTransactionCanceled,
   keys,
   queryAll,
@@ -142,6 +143,26 @@ async function addMembership(post, tag) {
 }
 
 /**
+ * Refreshes the post summary of an existing membership. A missing membership (when an older record
+ * is replayed after the tag was removed, or after a lost record) is created and counted instead of
+ * being written without its count, which a later removal would turn into a negative counter.
+ */
+async function refreshMembership(post, tag) {
+  try {
+    await dynamo().send(
+      new PutCommand({
+        TableName: tableName(),
+        Item: tagMembershipItem(post, tag),
+        ConditionExpression: 'attribute_exists(PK)',
+      }),
+    );
+  } catch (err) {
+    if (!isConditionalCheckFailed(err)) throw err;
+    await addMembership(post, tag);
+  }
+}
+
+/**
  * Applies the tag changes between two versions of a post to the tag projections.
  * `before` / `after` are the post items when published, null otherwise (a post that is not
  * published has no membership). Memberships are refreshed for the tags that are kept.
@@ -152,7 +173,7 @@ export async function projectTags(before, after) {
   const postId = (after ?? before)?.postId;
   for (const tag of diff.removed) await removeMembership(tag, postId);
   for (const tag of diff.added) await addMembership(after, tag);
-  await batchWriteAll(diff.kept.map((tag) => ({ PutRequest: { Item: tagMembershipItem(after, tag) } })));
+  for (const tag of diff.kept) await refreshMembership(after, tag);
   return diff;
 }
 

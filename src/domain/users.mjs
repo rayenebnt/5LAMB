@@ -659,10 +659,16 @@ export async function inviteUser({ email, name, role }, actor) {
     'admin',
   );
   const userId = attributeValue(user.Attributes, 'sub') ?? user.Username;
-  await sendCognito(
-    new AdminAddUserToGroupCommand({ UserPoolId: config.userPoolId, Username: userId, GroupName: role }),
-    'admin',
-  );
+  try {
+    await sendCognito(
+      new AdminAddUserToGroupCommand({ UserPoolId: config.userPoolId, Username: userId, GroupName: role }),
+      'admin',
+    );
+  } catch (err) {
+    // The account exists without any role: PATCH /users/{userId} can assign it.
+    logger.error('Role assignment failed after the account creation', { userId, role, error: err });
+    throw err;
+  }
   await initProfile({ userId, email, displayName: name });
   logger.info('User invited', { userId, role, by: actor?.userId });
   return toApiUser(user, [role]);

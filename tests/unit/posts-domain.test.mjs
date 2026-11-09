@@ -161,7 +161,10 @@ describe('updatePostSchema', () => {
 describe('listPostsQuerySchema', () => {
   test('defaults and coercion', () => {
     assert.deepEqual(validate(listPostsQuerySchema, {}), { limit: 10, status: 'published' });
-    assert.deepEqual(validate(listPostsQuerySchema, { limit: '50', status: 'in_review' }), { limit: 50, status: 'in_review' });
+    assert.deepEqual(validate(listPostsQuerySchema, { limit: '50', status: 'in_review' }), {
+      limit: 50,
+      status: 'in_review',
+    });
   });
 
   test('normalises the tag and the author', () => {
@@ -345,10 +348,14 @@ describe('buildPostItem', () => {
   });
 
   test('a provided excerpt is custom; an empty one is automatic', () => {
-    const custom = buildPostItem({ postId: POST_ID, slug: 's', input: { title: 'T', content: 'abc', excerpt: 'Mine' }, author: users.author, now: NOW });
+    const build = (excerpt) => {
+      const input = { title: 'T', content: 'abc', excerpt };
+      return buildPostItem({ postId: POST_ID, slug: 's', input, author: users.author, now: NOW });
+    };
+    const custom = build('Mine');
     assert.equal(custom.excerpt, 'Mine');
     assert.equal(custom.customExcerpt, true);
-    const empty = buildPostItem({ postId: POST_ID, slug: 's', input: { title: 'T', content: 'abc', excerpt: '' }, author: users.author, now: NOW });
+    const empty = build('');
     assert.equal(empty.excerpt, 'abc');
     assert.equal(empty.customExcerpt, false);
   });
@@ -474,7 +481,8 @@ describe('workflow', () => {
   });
 
   test('unpublish, reject and archive sort by update date and keep publishedAt', () => {
-    const unpublished = transitionChanges(storedPost({ status: 'published', publishedAt: CREATED }), 'unpublish', { now: NOW });
+    const published = storedPost({ status: 'published', publishedAt: CREATED });
+    const unpublished = transitionChanges(published, 'unpublish', { now: NOW });
     assert.deepEqual(unpublished, {
       status: 'draft',
       updatedAt: NOW,

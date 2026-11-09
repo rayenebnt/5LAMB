@@ -180,7 +180,13 @@ describe('POST /posts', () => {
     );
     assert.deepEqual(slugPut, {
       TableName: TABLE,
-      Item: { PK: 'SLUG#architecture-serverless-lambda-dynamodb', SK: 'SLUG', entityType: 'SLUG', slug: 'architecture-serverless-lambda-dynamodb', postId: post.id },
+      Item: {
+        PK: 'SLUG#architecture-serverless-lambda-dynamodb',
+        SK: 'SLUG',
+        entityType: 'SLUG',
+        slug: 'architecture-serverless-lambda-dynamodb',
+        postId: post.id,
+      },
       ConditionExpression: 'attribute_not_exists(PK)',
     });
   });
@@ -227,8 +233,9 @@ describe('POST /posts', () => {
     assert.equal(res.statusCode, 201, res.body);
     assert.equal(parse(res).slug, 'hello-world-3');
     const attempts = inputs(TransactWriteCommand);
-    assert.deepEqual(attempts.map((tx) => tx.TransactItems[1].Put.Item.slug), ['hello-world', 'hello-world-2', 'hello-world-3']);
-    assert.deepEqual(attempts.map((tx) => tx.TransactItems[0].Put.Item.slug), ['hello-world', 'hello-world-2', 'hello-world-3']);
+    const expected = ['hello-world', 'hello-world-2', 'hello-world-3'];
+    assert.deepEqual(attempts.map((tx) => tx.TransactItems[1].Put.Item.slug), expected, 'slug items');
+    assert.deepEqual(attempts.map((tx) => tx.TransactItems[0].Put.Item.slug), expected, 'post items');
     assert.equal(new Set(attempts.map((tx) => tx.TransactItems[0].Put.Item.postId)).size, 1);
   });
 
@@ -296,7 +303,13 @@ describe('POST /posts', () => {
     assertError(await create('{not json'), 400, 'BAD_REQUEST');
     assertError(await create('["T"]'), 400, 'BAD_REQUEST');
     assertError(
-      await call({ method: 'POST', resource: '/posts', body: 'title=T', headers: { 'Content-Type': 'text/plain' }, as: users.author }),
+      await call({
+        method: 'POST',
+        resource: '/posts',
+        body: 'title=T',
+        headers: { 'Content-Type': 'text/plain' },
+        as: users.author,
+      }),
       415,
       'UNSUPPORTED_MEDIA_TYPE',
     );
@@ -313,7 +326,10 @@ describe('PATCH /posts/{postId}', () => {
 
   test('the author edits a draft: consistent read, SET of the changed fields, version check', async () => {
     givenPost(postItem());
-    const res = await patch({ title: '  Nouveau titre ', content: 'Nouveau **contenu**' }, { headers: { 'If-Match': '"v4"' } });
+    const res = await patch(
+      { title: '  Nouveau titre ', content: 'Nouveau **contenu**' },
+      { headers: { 'If-Match': '"v4"' } },
+    );
 
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(res.headers.ETag, '"v5"');
@@ -334,7 +350,15 @@ describe('PATCH /posts/{postId}', () => {
     assert.equal(update.ConditionExpression, 'attribute_exists(PK) AND #version = :expectedVersion');
     assert.equal(update.ExpressionAttributeValues[':expectedVersion'], 4);
     assert.equal(update.ReturnValues, 'ALL_NEW');
-    assert.deepEqual(setAttributes(update), ['GSI1SK', 'content', 'excerpt', 'readingTimeMinutes', 'title', 'updatedAt', 'version']);
+    assert.deepEqual(setAttributes(update), [
+      'GSI1SK',
+      'content',
+      'excerpt',
+      'readingTimeMinutes',
+      'title',
+      'updatedAt',
+      'version',
+    ]);
     const values = setValues(update);
     assert.equal(values.version, 5);
     assert.equal(values.GSI1SK, `${values.updatedAt}#${POST_ID}`);
@@ -542,7 +566,13 @@ describe('PATCH /posts/{postId}', () => {
     assertError(await patch({ commentCount: 0 }), 400, 'VALIDATION_ERROR');
     assertError(await patch({ slug: 'Bad Slug' }), 400, 'VALIDATION_ERROR');
     assertError(
-      await call({ method: 'PATCH', resource: '/posts/{postId}', params: { postId: 'mon-article' }, body: { title: 'X' }, as: users.author }),
+      await call({
+        method: 'PATCH',
+        resource: '/posts/{postId}',
+        params: { postId: 'mon-article' },
+        body: { title: 'X' },
+        as: users.author,
+      }),
       400,
       'VALIDATION_ERROR',
     );
