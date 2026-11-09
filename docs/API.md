@@ -204,8 +204,10 @@ Les index de **tags** (`GET /tags`, `GET /posts?tag=`) et de **recherche** (`GET
 mis à jour de façon asynchrone par DynamoDB Streams, généralement en moins d'une seconde après une
 publication, une modification, une dépublication ou un changement du nombre de commentaires. Les
 listes servies par les index secondaires (`GET /posts`, files de modération, médiathèque) sont
-également cohérentes à terme. Seule la lecture d'une ressource par son identifiant
-(`GET /posts/{postId}`, `GET /media/{mediaId}`…) reflète immédiatement les écritures.
+également cohérentes à terme. Les lectures par identifiant (`GET /posts/{postId}`,
+`GET /media/{mediaId}`…) utilisent elles aussi des lectures DynamoDB cohérentes à terme (moins
+chères), qui reflètent les écritures en général en quelques millisecondes ; les modifications, elles,
+partent toujours d'une lecture fortement cohérente.
 
 ---
 

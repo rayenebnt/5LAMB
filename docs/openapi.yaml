@@ -1,8 +1,9 @@
 # OpenAPI description of the Blogify REST API.
 # Source of truth for the API contract: scripts/build.mjs converts it to dist/docs/openapi.json,
 # served by GET /openapi.json and rendered by Swagger UI on GET /docs.
-# tests/unit/template.test.mjs and tests/unit/docs-openapi.test.mjs check that it documents exactly
-# the routes of template.yaml, that every $ref resolves and that every example matches its schema.
+# tests/unit/template.test.mjs checks that it documents exactly the routes of template.yaml (with
+# their security, an operationId and a summary); tests/unit/docs.test.mjs checks that every $ref
+# resolves. No test validates the examples against their schemas: check them when editing.
 openapi: '3.0.3'
 info:
   title: Blogify API
@@ -16,8 +17,12 @@ info:
 
     1. Créez un compte avec `POST /auth/register` (rôle `guest-author`), puis connectez-vous avec `POST /auth/login`.
     2. Envoyez le **jeton d'identité Cognito** (`idToken`, et non l'`accessToken`) dans l'en-tête `Authorization: Bearer <idToken>`. Il est valable 60 minutes : renouvelez-le avec `POST /auth/refresh` (refresh token valable 30 jours) et révoquez la session avec `POST /auth/logout`.
-    3. Les routes protégées (cadenas) sont contrôlées par un authorizer Lambda qui vérifie la signature, l'expiration, l'émetteur, l'audience et `token_use = id` du jeton : jeton absent, invalide ou expiré → `401 UNAUTHORIZED`.
-    4. Certaines routes publiques acceptent un jeton **facultatif** qui personnalise la réponse (brouillons visibles par leur auteur, commentaires d'un membre approuvés d'office…) ; un jeton fourni mais invalide y est refusé (`401 UNAUTHORIZED`).
+    3. Les routes protégées (cadenas) sont contrôlées par un authorizer Lambda qui vérifie la signature, l'expiration, l'émetteur, l'audience et `token_use = id` du jeton : jeton absent, invalide ou expiré → `401 UNAUTHORIZED`. API Gateway met le résultat de ce contrôle en cache **300 secondes** par jeton : un jeton déjà accepté le reste sur les routes protégées jusqu'à 5 minutes après son expiration.
+    4. Certaines routes publiques acceptent un jeton **facultatif** qui personnalise la réponse (brouillons visibles par leur auteur, commentaires en attente visibles des modérateurs…) ; un jeton fourni mais invalide ou expiré y est refusé (`401 UNAUTHORIZED`), sans délai de cache.
+
+    La désactivation d'un compte ou un changement de rôle ne révoque pas les ID tokens déjà émis : ils restent acceptés jusqu'à leur expiration (60 minutes au plus, plus le cache de 300 secondes sur les routes protégées) avec les rôles qu'ils contiennent. Les routes d'administration (`/users`) revérifient donc à chaque appel, dans Amazon Cognito, que l'appelant est toujours un administrateur actif (`403 FORBIDDEN` sinon).
+
+    Si les clés publiques de Cognito ne peuvent pas être téléchargées, une route à jeton facultatif appelée avec un jeton répond `503 SERVICE_UNAVAILABLE` (avec `Retry-After: 1`) et une route protégée `500` (`AUTHORIZER_FAILURE`, réponse d'API Gateway) : réessayez sans abandonner la session.
 
     Sur cette page, cliquez sur **Authorize** et collez l'`idToken` (sans le préfixe `Bearer`).
 
@@ -31,7 +36,7 @@ info:
     | `editor` | lire, modifier, publier, rejeter, archiver et supprimer **tous** les articles ; modérer les commentaires ; gérer toute la médiathèque |
     | `guest-author` | créer ses propres articles, les modifier ou les supprimer tant qu'ils sont en brouillon ou en relecture, les soumettre à relecture ; téléverser des médias |
 
-    Les nouveaux inscrits sont `guest-author`. Un compte sans groupe est authentifié mais n'a aucun droit d'écriture. Un changement de rôle prend effet au prochain renouvellement du jeton. Permission manquante → `403 FORBIDDEN` ; une ressource que l'appelant n'a pas le droit de voir (brouillon d'un autre auteur, média en attente…) est signalée comme inexistante (`404 NOT_FOUND`) afin de ne pas révéler son existence.
+    Les nouveaux inscrits sont `guest-author`. Un compte sans groupe (incident lors de l'inscription, compte créé hors de l'API) est authentifié mais n'a aucun droit d'écriture ; `POST /auth/login` lui attribue le rôle `guest-author`. Seuls les commentaires des éditeurs et administrateurs sont publiés sans modération. Un changement de rôle prend effet au prochain renouvellement du jeton. Permission manquante → `403 FORBIDDEN` ; une ressource que l'appelant n'a pas le droit de voir (brouillon d'un autre auteur, média en attente…) est signalée comme inexistante (`404 NOT_FOUND`) afin de ne pas révéler son existence.
 
     ## Pagination
 
@@ -46,13 +51,13 @@ info:
       "error": {
         "code": "VALIDATION_ERROR",
         "message": "Request validation failed",
-        "details": [{ "field": "title", "message": "Too small: expected string to have >=1 characters" }]
+        "details": [{ "field": "title", "message": "Title is required" }]
       },
       "requestId": "c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e"
     }
     ```
 
-    `code` est stable et destiné aux programmes, `message` (en anglais) aux développeurs ; `details` n'est présent que pour les erreurs de validation ; `requestId` identifie la requête dans les journaux. Les corps JSON sont validés strictement : un champ inconnu est refusé (`400 VALIDATION_ERROR`). Les erreurs inattendues ne révèlent jamais de détail interne.
+    `code` est stable et destiné aux programmes, `message` (en anglais) aux développeurs ; `details` n'est présent que pour les erreurs de validation ; `requestId` identifie la requête dans les journaux. Les entrées sont validées strictement et refusées avec `400 VALIDATION_ERROR` : champ inconnu dans un corps JSON, paramètre de requête inconnu sur les listes, la recherche et `GET /tags` (un paramètre anti-cache `_=…` compris), identifiant mal formé dans le chemin (un UUID est attendu, sauf pour `GET /posts/{postId}` qui accepte aussi un slug). Les erreurs inattendues ne révèlent jamais de détail interne.
 
     | HTTP | Codes |
     |---|---|
@@ -60,12 +65,16 @@ info:
     | 401 | `UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_TOKEN` |
     | 403 | `FORBIDDEN`, `COMMENTS_DISABLED`, `USER_NOT_CONFIRMED`, `PASSWORD_RESET_REQUIRED` |
     | 404 | `NOT_FOUND`, `ROUTE_NOT_FOUND` |
-    | 409 | `CONFLICT`, `SLUG_TAKEN`, `INVALID_STATE_TRANSITION`, `USER_EXISTS`, `SELF_MODIFICATION`, `ALREADY_SUBSCRIBED` |
+    | 409 | `CONFLICT`, `SLUG_TAKEN`, `INVALID_STATE_TRANSITION`, `USER_EXISTS`, `SELF_MODIFICATION`, `TAG_SUBSCRIPTIONS_FULL` |
     | 412 | `PRECONDITION_FAILED` |
     | 413 | `PAYLOAD_TOO_LARGE` |
     | 415 | `UNSUPPORTED_MEDIA_TYPE` |
     | 429 | `TOO_MANY_REQUESTS` |
-    | 5xx | `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE` (avec l'en-tête `Retry-After`) |
+    | 500 | `INTERNAL_ERROR` |
+    | 501 | `UNSUPPORTED_CHALLENGE` (défi Cognito non géré par l'API, par exemple MFA) |
+    | 503 | `SERVICE_UNAVAILABLE` (avec l'en-tête `Retry-After`) |
+
+    Les erreurs produites par API Gateway lui-même (authorizer, limites de débit, route inconnue…) ont la même forme : `UNAUTHORIZED`, `FORBIDDEN`, `ROUTE_NOT_FOUND` ou `TOO_MANY_REQUESTS`, et sinon le type de réponse de la passerelle, par exemple `AUTHORIZER_FAILURE` (500), `INTEGRATION_TIMEOUT` (504) ou `REQUEST_TOO_LARGE` (413, corps de plus de 10 Mo).
 
     ## Concurrence optimiste (ETag / If-Match)
 
@@ -79,19 +88,25 @@ info:
     2. Envoyez une requête `POST` `multipart/form-data` vers `upload.url` contenant tous les champs de `upload.fields`, puis le fichier dans un dernier champ `file`. S3 répond `204 No Content`. Le fichier doit avoir le `Content-Type` déclaré et ne pas dépasser la taille déclarée (`size`).
     3. Le fichier est vérifié de façon asynchrone (type, taille et signature binaire réels) : le média passe à `ready` (son `url` devient disponible) ou à `rejected` (`rejectionReason`, fichier supprimé). Interrogez `GET /media/{mediaId}` pour suivre son statut.
 
-    Formats acceptés : JPEG, PNG, GIF, WebP et AVIF (10 Mio maximum par défaut), MP4, WebM et QuickTime (200 Mio maximum par défaut). Le SVG est refusé (risque de XSS). Un média jamais téléversé est purgé automatiquement après 24 heures.
+    Amazon CloudFront ne diffuse que les fichiers validés par cette vérification, et l'`url` CloudFront d'un média `ready` est permanente (sans CDN, `url` est une URL S3 présignée temporaire). Tant que l'autorisation de téléversement n'a pas expiré, un nouvel envoi remplace le fichier, qui est alors vérifié de nouveau (un contenu invalide fait passer le média à `rejected`).
+
+    Formats acceptés : JPEG, PNG, GIF, WebP et AVIF (10 Mio maximum par défaut), MP4, WebM et QuickTime (200 Mio maximum par défaut). Le SVG est refusé (risque de XSS). Un média jamais téléversé est purgé automatiquement après 24 heures, un média refusé après 7 jours.
 
     ## Cohérence à terme
 
-    Certaines vues sont des projections mises à jour **de façon asynchrone** (DynamoDB Streams), généralement quelques secondes après la publication, la modification ou la suppression d'un article : la recherche (`GET /search`), les tags (`GET /tags`), la liste par tag (`GET /posts?tag=…`), la suppression des commentaires d'un article supprimé, ainsi que l'envoi de la newsletter (Amazon SNS) et de l'événement `PostPublished` (Amazon EventBridge). Les autres lectures reflètent immédiatement les écritures.
+    L'API lit DynamoDB en cohérence à terme : une écriture confirmée apparaît généralement en moins d'une seconde dans les lectures suivantes, en particulier dans les listes servies par des index secondaires (`GET /posts`, `GET /comments`, `GET /media`). Les écritures, elles, partent toujours de l'état courant (lecture fortement cohérente, puis écriture conditionnelle).
+
+    Certaines vues sont en outre des projections mises à jour **de façon asynchrone** (DynamoDB Streams), généralement en moins d'une seconde : la recherche (`GET /search`), les tags (`GET /tags`) et la liste par tag (`GET /posts?tag=…`, y compris le `commentCount` et la `version` des articles listés). Il en va de même de la suppression des commentaires d'un article supprimé, de l'envoi de la newsletter (Amazon SNS) et de l'événement `PostPublished` (Amazon EventBridge).
 
     ## Limites de débit et cache
 
-    API Gateway limite le débit à 100 requêtes/s (rafales de 200), avec des limites plus strictes sur les routes exposées aux abus (`POST /auth/register`, `POST /auth/login`, `POST /auth/forgot-password`, `POST /posts/{postId}/comments`, `POST /subscriptions`) : au-delà → `429 TOO_MANY_REQUESTS`. Les lectures publiques anonymes sont cachables (`Cache-Control: public, max-age=…`) ; les réponses personnalisées sont marquées `private, no-store`.
+    API Gateway limite le débit à 100 requêtes/s (rafales de 200), avec des limites plus strictes sur les routes exposées aux abus (`POST /auth/register`, `POST /auth/login`, `POST /auth/forgot-password`, `POST /posts/{postId}/comments`, `POST /subscriptions`) : au-delà → `429 TOO_MANY_REQUESTS`.
+
+    Les lectures publiques anonymes sont cachables (`Cache-Control: public, max-age=60, stale-while-revalidate=300` ; durées plus longues pour `GET /tags`, `GET /docs` et `GET /openapi.json`) ; les réponses personnalisées ou non publiques sont marquées `private, no-store`. La plupart des lectures portent `Vary: Authorization`, afin qu'un cache ne serve pas une réponse anonyme à un appelant authentifié. Les réponses contenant des jetons portent `Cache-Control: no-store` et `Pragma: no-cache`.
 
     ## Conventions
 
-    JSON en UTF-8 (`Content-Type: application/json` obligatoire pour les corps de requête, 1 Mio maximum), champs en camelCase, dates ISO 8601 en UTC, identifiants UUID (v7, triables chronologiquement, pour les articles, commentaires et médias ; `sub` Cognito pour les utilisateurs). Création → `201 Created` avec l'en-tête `Location` ; suppression → `204 No Content`. CORS : en-têtes `Content-Type`, `Authorization` et `If-Match` autorisés ; `ETag` et `Location` exposés.
+    JSON en UTF-8 (`Content-Type: application/json` obligatoire pour les corps de requête, 1 Mio maximum), champs en camelCase, dates ISO 8601 en UTC, identifiants UUID (v7, triables chronologiquement, pour les articles, commentaires et médias ; `sub` Cognito pour les utilisateurs). Création → `201 Created` avec l'en-tête `Location`, chemin de la ressource créée relatif à l'hôte de l'API et préfixe de déploiement compris (par exemple `/dev/posts/{id}` sur l'URL `execute-api`, où `dev` est le stage) ; suppression → `204 No Content`. Les noms affichés (auteurs, commentaires, médias) ne sont jamais dérivés d'une adresse e-mail : à défaut de nom, l'API utilise `Anonymous`. CORS : en-têtes `Content-Type`, `Authorization` et `If-Match` autorisés ; `ETag` et `Location` exposés.
 
 servers:
   - url: 'https://{apiId}.execute-api.{region}.amazonaws.com/{stage}'
@@ -156,7 +171,7 @@ paths:
       operationId: register
       summary: Créer un compte (auteur invité)
       description: |-
-        Crée un compte Amazon Cognito avec le rôle `guest-author` (auteur invité) ainsi que son profil public.
+        Crée un compte Amazon Cognito avec le rôle `guest-author` (auteur invité) ainsi que son profil public, désigné par l'en-tête `Location` (`GET /authors/{userId}`).
 
         - En mode démonstration (paramètre de déploiement `AutoConfirmUsers=true`), le compte est confirmé immédiatement : `confirmed: true`, `nextStep: LOGIN`.
         - Sinon, Cognito envoie un code de vérification par e-mail : `confirmed: false`, `nextStep: CONFIRM_SIGN_UP` (voir `POST /auth/confirm`).
@@ -172,6 +187,12 @@ paths:
       responses:
         '201':
           description: Compte créé.
+          headers:
+            Location:
+              description: Chemin du profil public du compte (`GET /authors/{userId}`), relatif à l'hôte de l'API, préfixe de déploiement compris.
+              schema:
+                type: string
+                example: /dev/authors/3f8a2b1c-4d5e-4f60-8a7b-9c0d1e2f3a4b
           content:
             application/json:
               schema:
@@ -238,7 +259,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ConfirmResponse'
         '400':
-          description: Données invalides (`VALIDATION_ERROR`), code incorrect (`INVALID_CODE`) ou expiré (`EXPIRED_CODE`, demander un nouveau code avec `POST /auth/resend-code`).
+          description: Données invalides (`VALIDATION_ERROR`), code incorrect (`INVALID_CODE`, également renvoyé pour un compte inconnu afin de ne pas révéler les adresses inscrites) ou expiré (`EXPIRED_CODE`, demander un nouveau code avec `POST /auth/resend-code`), paramètre refusé par Cognito (`INVALID_PARAMETER`).
           content:
             application/json:
               schema:
@@ -249,7 +270,7 @@ paths:
                 expiredCode:
                   $ref: '#/components/examples/ExpiredCode'
         '401':
-          description: Confirmation refusée par Cognito, par exemple pour un compte déjà confirmé.
+          description: Confirmation refusée par Cognito pour ce compte, par exemple un compte déjà confirmé (`INVALID_CREDENTIALS`).
           content:
             application/json:
               schema:
@@ -257,7 +278,7 @@ paths:
               example:
                 error:
                   code: INVALID_CREDENTIALS
-                  message: 'User cannot be confirmed. Current status is CONFIRMED'
+                  message: This operation is not allowed for this account
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
@@ -273,7 +294,10 @@ paths:
       tags: [Authentification]
       operationId: resendConfirmationCode
       summary: Renvoyer le code de confirmation
-      description: Renvoie par e-mail le code de confirmation d'inscription.
+      description: |-
+        Renvoie par e-mail le code de confirmation d'inscription.
+
+        La réponse est **toujours** `202`, que le compte existe, attende sa confirmation ou soit déjà confirmé, afin de ne pas permettre l'énumération des comptes.
       security: []
       requestBody:
         required: true
@@ -283,15 +307,15 @@ paths:
               $ref: '#/components/schemas/EmailRequest'
       responses:
         '202':
-          description: Code renvoyé (si le compte existe et n'est pas encore confirmé).
+          description: Demande prise en compte ; un code n'est envoyé que si le compte existe et attend sa confirmation.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Message'
               example:
-                message: A new confirmation code has been sent by e-mail.
+                message: If the account exists and is awaiting confirmation, a new verification code has been e-mailed
         '400':
-          description: E-mail invalide (`VALIDATION_ERROR`) ou compte déjà confirmé (`INVALID_PARAMETER`).
+          description: E-mail invalide (`VALIDATION_ERROR`).
           content:
             application/json:
               schema:
@@ -299,13 +323,8 @@ paths:
               examples:
                 invalidEmail:
                   $ref: '#/components/examples/InvalidEmail'
-                alreadyConfirmed:
-                  summary: Compte déjà confirmé
-                  value:
-                    error:
-                      code: INVALID_PARAMETER
-                      message: User is already confirmed.
-                    requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+        '401':
+          $ref: '#/components/responses/AccountOperationRefused'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -323,9 +342,11 @@ paths:
       description: |-
         Authentifie l'utilisateur (flux Cognito `USER_PASSWORD_AUTH`) et renvoie ses jetons. Utilisez **`idToken`** dans l'en-tête `Authorization: Bearer <idToken>` des routes protégées.
 
-        À la première connexion d'un compte créé par un administrateur (mot de passe temporaire reçu par e-mail), la réponse est le défi `NEW_PASSWORD_REQUIRED` accompagné d'une `session` : terminez la connexion avec `POST /auth/new-password`.
+        - Tout mot de passe non vide (256 caractères au plus) est transmis à Cognito : la politique de mot de passe n'est pas appliquée à la connexion, et un mot de passe incorrect donne `401 INVALID_CREDENTIALS`.
+        - À la première connexion d'un compte créé par un administrateur (mot de passe temporaire reçu par e-mail), la réponse est le défi `NEW_PASSWORD_REQUIRED` accompagné d'une `session` : terminez la connexion avec `POST /auth/new-password`.
+        - Un compte qui n'a encore aucun rôle reçoit `guest-author` lors de la connexion ; les jetons renvoyés le contiennent déjà (sans action du client).
 
-        Limite de débit renforcée (10 requêtes/s).
+        La réponse n'est jamais mise en cache (`Cache-Control: no-store`, `Pragma: no-cache`). Limite de débit renforcée (10 requêtes/s).
       security: []
       requestBody:
         required: true
@@ -336,6 +357,11 @@ paths:
       responses:
         '200':
           description: Connexion réussie (jetons) ou nouveau mot de passe exigé (défi).
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
           content:
             application/json:
               schema:
@@ -367,7 +393,7 @@ paths:
               example:
                 error:
                   code: INVALID_CREDENTIALS
-                  message: Incorrect e-mail or password
+                  message: Incorrect e-mail address or password
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '403':
           description: Compte non confirmé (`USER_NOT_CONFIRMED`, voir `POST /auth/confirm`) ou réinitialisation du mot de passe exigée (`PASSWORD_RESET_REQUIRED`, voir `POST /auth/forgot-password`).
@@ -381,14 +407,14 @@ paths:
                   value:
                     error:
                       code: USER_NOT_CONFIRMED
-                      message: User is not confirmed
+                      message: The account has not been confirmed yet (see the e-mailed code)
                     requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
                 passwordResetRequired:
                   summary: Réinitialisation du mot de passe exigée
                   value:
                     error:
                       code: PASSWORD_RESET_REQUIRED
-                      message: Password reset required for the user
+                      message: A password reset is required for this account
                     requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
@@ -396,6 +422,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '501':
+          $ref: '#/components/responses/UnsupportedChallenge'
         '5XX':
           $ref: '#/components/responses/ServerError'
 
@@ -404,7 +432,7 @@ paths:
       tags: [Authentification]
       operationId: refreshTokens
       summary: Renouveler les jetons
-      description: Obtient un nouvel ID token et un nouvel access token à partir du refresh token (valable 30 jours). Le refresh token n'est renvoyé que si Cognito en émet un nouveau ; sinon, conservez celui reçu à la connexion.
+      description: Obtient un nouvel ID token et un nouvel access token à partir du refresh token (valable 30 jours) ; ils portent les rôles actuels du compte. Le refresh token n'est renvoyé que si Cognito en émet un nouveau ; sinon, conservez celui reçu à la connexion. La réponse n'est jamais mise en cache.
       security: []
       requestBody:
         required: true
@@ -415,6 +443,11 @@ paths:
       responses:
         '200':
           description: Nouveaux jetons.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
           content:
             application/json:
               schema:
@@ -443,7 +476,7 @@ paths:
       operationId: completeNewPassword
       summary: Choisir un mot de passe (première connexion)
       description: >-
-        Répond au défi `NEW_PASSWORD_REQUIRED` renvoyé par `POST /auth/login` pour un compte créé par un administrateur : définit le mot de passe définitif et renvoie les jetons. La `session` du défi n'est valable que quelques minutes.
+        Répond au défi `NEW_PASSWORD_REQUIRED` renvoyé par `POST /auth/login` pour un compte créé par un administrateur : définit le mot de passe définitif et renvoie les jetons. La `session` du défi n'est valable que quelques minutes. La réponse n'est jamais mise en cache.
       security: []
       requestBody:
         required: true
@@ -454,12 +487,17 @@ paths:
       responses:
         '200':
           description: Mot de passe défini, utilisateur connecté.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Tokens'
         '400':
-          description: Données invalides (`VALIDATION_ERROR`), mot de passe refusé par la politique Cognito (`INVALID_PASSWORD`) ou paramètre refusé par Cognito (`INVALID_PARAMETER`).
+          description: Données invalides (`VALIDATION_ERROR`, par exemple un mot de passe hors politique), mot de passe refusé par Cognito (`INVALID_PASSWORD`) ou paramètre refusé par Cognito (`INVALID_PARAMETER`).
           content:
             application/json:
               schema:
@@ -478,7 +516,7 @@ paths:
               example:
                 error:
                   code: INVALID_CREDENTIALS
-                  message: Invalid session for the user, session is expired.
+                  message: Invalid credentials or expired session, please log in again
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
@@ -486,6 +524,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '501':
+          $ref: '#/components/responses/UnsupportedChallenge'
         '5XX':
           $ref: '#/components/responses/ServerError'
 
@@ -513,9 +553,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Message'
               example:
-                message: If an account exists for this e-mail, a reset code has been sent.
+                message: If an account exists for this e-mail address, a password reset code has been e-mailed
         '400':
-          description: E-mail invalide (`VALIDATION_ERROR`) ou paramètre refusé par Cognito (`INVALID_PARAMETER`).
+          description: E-mail invalide (`VALIDATION_ERROR`).
           content:
             application/json:
               schema:
@@ -553,9 +593,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Message'
               example:
-                message: Password has been reset, you can now log in.
+                message: Password updated, you can now log in with the new password
         '400':
-          description: Données invalides (`VALIDATION_ERROR`), code incorrect (`INVALID_CODE`) ou expiré (`EXPIRED_CODE`), mot de passe refusé par la politique Cognito (`INVALID_PASSWORD`).
+          description: Données invalides (`VALIDATION_ERROR`), code incorrect (`INVALID_CODE`, également renvoyé pour un compte inconnu) ou expiré (`EXPIRED_CODE`), mot de passe refusé par Cognito (`INVALID_PASSWORD`) ou paramètre refusé par Cognito (`INVALID_PARAMETER`).
           content:
             application/json:
               schema:
@@ -567,6 +607,8 @@ paths:
                   $ref: '#/components/examples/ExpiredCode'
                 invalidPassword:
                   $ref: '#/components/examples/InvalidPassword'
+        '401':
+          $ref: '#/components/responses/AccountOperationRefused'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -582,7 +624,7 @@ paths:
       operationId: logout
       summary: Se déconnecter
       description: >-
-        Révoque le refresh token ainsi que les access tokens émis à partir de celui-ci. Les ID tokens déjà émis restent acceptés jusqu'à leur expiration (60 minutes au plus) : supprimez-les côté client.
+        Révoque le refresh token ainsi que les access tokens émis à partir de celui-ci. Les ID tokens déjà émis restent acceptés jusqu'à leur expiration (60 minutes au plus, plus 5 minutes au maximum sur les routes protégées du fait du cache de l'authorizer) : supprimez-les côté client.
       security: []
       requestBody:
         required: true
@@ -614,12 +656,17 @@ paths:
       tags: [Profils]
       operationId: getMyProfile
       summary: Consulter mon profil
-      description: Profil de l'utilisateur connecté, avec son rôle et la liste triée de ses permissions effectives (utile pour adapter l'interface). Le profil est créé automatiquement lors de la première lecture.
+      description: Profil de l'utilisateur connecté, avec son rôle et la liste triée de ses permissions effectives (utile pour adapter l'interface), tels que les indique son jeton. Le profil est créé automatiquement lors de la première lecture.
       security:
         - bearerAuth: []
       responses:
         '200':
           description: Profil de l'utilisateur connecté.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -635,7 +682,7 @@ paths:
       operationId: updateMyProfile
       summary: Modifier mon profil
       description: |-
-        Met à jour le profil de l'utilisateur connecté (au moins un champ). `null` efface `bio`, `avatarUrl` ou `website`.
+        Met à jour le profil de l'utilisateur connecté (au moins un champ). `null` efface `bio`, `avatarUrl` ou `website` (une `bio` vide aussi).
 
         Un changement de `name` est aussi appliqué au compte Cognito : il figure dans les prochains jetons et sur les futurs articles et commentaires ; les articles existants conservent le nom d'auteur d'origine.
       security:
@@ -659,6 +706,11 @@ paths:
       responses:
         '200':
           description: Profil mis à jour.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -667,6 +719,17 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Changement de `name` alors que le compte Cognito a été supprimé et que le jeton est encore valide (`NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: User not found
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -681,17 +744,27 @@ paths:
       tags: [Profils]
       operationId: getAuthor
       summary: Consulter le profil public d'un auteur
-      description: Profil public d'un auteur (nom, biographie, avatar, site web), par exemple pour la page « auteur » d'un blog. L'adresse e-mail n'est jamais exposée.
+      description: Profil public d'un auteur (nom, biographie, avatar, site web), par exemple pour la page « auteur » d'un blog. L'adresse e-mail n'est jamais exposée. Réponse publique cachable 60 secondes.
       security: []
       parameters:
         - $ref: '#/components/parameters/UserId'
       responses:
         '200':
           description: Profil public.
+          headers:
+            Cache-Control:
+              description: Réponse publique, toujours cachable.
+              schema:
+                type: string
+                example: 'public, max-age=60, stale-while-revalidate=300'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PublicAuthor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
@@ -704,12 +777,22 @@ paths:
       tags: [Utilisateurs]
       operationId: listUsers
       summary: Lister les utilisateurs
-      description: Liste paginée des comptes du user pool Cognito avec leur rôle et leur statut, éventuellement filtrée par rôle. Permission `user:manage` (administrateurs).
+      description: |-
+        Liste paginée des comptes du user pool Cognito avec leur rôle (le plus élevé) et leur statut, éventuellement filtrée par rôle.
+
+        Permission `user:manage` (administrateurs), revérifiée à chaque appel dans Amazon Cognito : un administrateur désactivé ou rétrogradé reçoit `403` même avec un jeton encore valide.
       security:
         - bearerAuth: []
       parameters:
         - $ref: '#/components/parameters/Limit60'
-        - $ref: '#/components/parameters/Cursor'
+        - name: cursor
+          in: query
+          required: false
+          description: Curseur opaque de pagination, valeur `nextCursor` de la page précédente, obtenue avec le même filtre `role` (sinon `400`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 4096
         - name: role
           in: query
           required: false
@@ -719,6 +802,11 @@ paths:
       responses:
         '200':
           description: Page d'utilisateurs.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -728,7 +816,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          $ref: '#/components/responses/AdminForbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '5XX':
@@ -738,9 +826,12 @@ paths:
       operationId: inviteUser
       summary: Créer (inviter) un utilisateur
       description: |-
-        Crée un compte avec le rôle choisi, par exemple un éditeur. Cognito envoie à l'utilisateur un e-mail d'invitation contenant un mot de passe temporaire (valable 7 jours) ; à la première connexion, `POST /auth/login` renvoie le défi `NEW_PASSWORD_REQUIRED` (voir `POST /auth/new-password`).
+        Crée un compte avec le rôle choisi, par exemple un éditeur. Cognito envoie à l'utilisateur un e-mail d'invitation contenant un mot de passe temporaire (valable 7 jours) ; à la première connexion, `POST /auth/login` renvoie le défi `NEW_PASSWORD_REQUIRED` (voir `POST /auth/new-password`). L'en-tête `Location` désigne le profil public du compte (`GET /authors/{userId}`).
 
-        Permission `user:manage` (administrateurs).
+        - Adresse dont le compte n'a jamais terminé sa première connexion (statut `FORCE_CHANGE_PASSWORD`) : l'invitation est renvoyée, le rôle demandé est appliqué et la réponse est `200` (sans `Location`).
+        - Tout autre compte existant pour cette adresse : `409 USER_EXISTS`.
+
+        Permission `user:manage` (administrateurs), revérifiée à chaque appel dans Amazon Cognito : un administrateur désactivé ou rétrogradé reçoit `403` même avec un jeton encore valide.
       security:
         - bearerAuth: []
       requestBody:
@@ -752,6 +843,27 @@ paths:
       responses:
         '201':
           description: Compte créé, invitation envoyée.
+          headers:
+            Location:
+              description: Chemin du profil public du compte créé (`GET /authors/{userId}`), relatif à l'hôte de l'API, préfixe de déploiement compris.
+              schema:
+                type: string
+                example: /dev/authors/7c9e6679-7425-40de-944b-e07fc1f90ae7
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+              example:
+                id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                email: eddie.durand@example.com
+                name: Eddie Durand
+                status: FORCE_CHANGE_PASSWORD
+                enabled: true
+                role: editor
+                createdAt: '2026-10-18T11:00:00.000Z'
+                updatedAt: '2026-10-18T11:00:00.000Z'
+        '200':
+          description: Invitation renvoyée à un compte qui n'a pas encore terminé sa première connexion (rôle demandé appliqué, nom inchangé, pas d'en-tête `Location`).
           content:
             application/json:
               schema:
@@ -777,9 +889,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          $ref: '#/components/responses/AdminForbidden'
         '409':
-          $ref: '#/components/responses/UserExists'
+          description: Un compte autre qu'une invitation en attente existe déjà pour cette adresse e-mail (`USER_EXISTS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: USER_EXISTS
+                  message: An account already exists for this e-mail address
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -798,10 +919,10 @@ paths:
         Change le rôle d'un utilisateur et/ou active ou désactive son compte (au moins un champ).
 
         - Un changement de rôle prend effet au prochain renouvellement de jeton de l'utilisateur (ou à sa prochaine connexion).
-        - La désactivation révoque aussi ses refresh tokens ; les ID tokens déjà émis restent valables jusqu'à leur expiration (60 minutes au plus).
+        - La désactivation révoque aussi ses refresh tokens ; les ID tokens déjà émis restent valables jusqu'à leur expiration (60 minutes au plus, plus 5 minutes au maximum sur les routes protégées du fait du cache de l'authorizer), mais les routes d'administration refusent aussitôt un administrateur désactivé ou rétrogradé.
         - Un administrateur ne peut ni changer son propre rôle ni désactiver son propre compte (`409 SELF_MODIFICATION`).
 
-        Permission `user:manage` (administrateurs).
+        Permission `user:manage` (administrateurs), revérifiée à chaque appel dans Amazon Cognito : un administrateur désactivé ou rétrogradé reçoit `403` même avec un jeton encore valide.
       security:
         - bearerAuth: []
       parameters:
@@ -833,7 +954,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          $ref: '#/components/responses/AdminForbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -845,7 +966,7 @@ paths:
               example:
                 error:
                   code: SELF_MODIFICATION
-                  message: Administrators cannot change their own role or disable their own account
+                  message: Administrators cannot change their own role or account status
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
@@ -865,16 +986,16 @@ paths:
       operationId: listPosts
       summary: Lister les articles
       description: |-
-        Liste paginée d'articles, du plus récent au plus ancien (date de publication pour `published`, date de dernière modification pour les autres statuts). Les éléments sont des résumés : le contenu (`content`) n'est jamais inclus dans une liste.
+        Liste paginée d'articles, du plus récent au plus ancien quel que soit le filtre : par date de publication pour `published`, par date de dernière modification pour les autres statuts. Les éléments sont des résumés : le contenu (`content`) n'est jamais inclus dans une liste.
 
         | Filtres | Accès | Résultat |
         |---|---|---|
         | aucun | public | articles publiés |
-        | `tag` | public | articles publiés portant ce tag (projection asynchrone) |
+        | `tag` | public | articles publiés portant ce tag, filtrables par `author` (projection asynchrone) |
         | `author` | public (`me` : jeton requis) | articles publiés de cet auteur |
         | `status` ≠ `published` | jeton requis | éditeurs et administrateurs : tous les articles de ce statut (filtrables par `author`) ; autres utilisateurs : uniquement leurs propres articles |
 
-        `tag` ne peut pas être combiné avec un statut autre que `published`. La réponse est cachable (`public`) uniquement pour un appel anonyme.
+        `tag` ne peut pas être combiné avec un statut autre que `published` (`400 VALIDATION_ERROR`). Les listes sont cohérentes à terme ; la liste par tag est une projection mise à jour de façon asynchrone : une modification d'un article (y compris de son `commentCount` ou de sa `version`) y apparaît généralement en moins d'une seconde. La réponse est cachable (`public`) uniquement pour un appel anonyme.
       security:
         - {}
         - bearerAuth: []
@@ -890,15 +1011,16 @@ paths:
         - name: tag
           in: query
           required: false
-          description: Tag recherché (normalisé comme à l'enregistrement, « Serverless AWS » devient `serverless-aws`).
+          description: Tag recherché (normalisé comme à l'enregistrement, « Serverless AWS » devient `serverless-aws`) ; il doit contenir au moins une lettre ou un chiffre.
           schema:
             type: string
             minLength: 1
+            maxLength: 40
           example: serverless
         - name: author
           in: query
           required: false
-          description: Identifiant (`sub` Cognito) d'un auteur, ou `me` pour l'appelant (jeton requis).
+          description: Identifiant (`sub` Cognito, UUID) d'un auteur, ou `me` pour l'appelant (jeton requis) ; toute autre valeur est refusée (`400`).
           schema:
             type: string
             minLength: 1
@@ -909,6 +1031,11 @@ paths:
           headers:
             Cache-Control:
               $ref: '#/components/headers/CacheControl'
+            Vary:
+              description: '`Authorization` (listes d''articles publiés uniquement), afin qu''un cache ne serve pas une réponse anonyme à un appelant authentifié.'
+              schema:
+                type: string
+                example: Authorization
           content:
             application/json:
               schema:
@@ -936,7 +1063,7 @@ paths:
                     version: 4
                 nextCursor: eyJQSyI6IlBPU1QjMDE5MmY0YTAtNWIxYy03ZDJlLThmM2EtNGI1YzZkN2U4ZjkwIiwiU0siOiJQT1NUIiwiR1NJMVBLIjoiUE9TVFMjcHVibGlzaGVkIiwiR1NJMVNLIjoiMjAyNi0xMC0yMlQxNDowNToxMi4wMDBaIzAxOTJmNGEwLTViMWMtN2QyZS04ZjNhLTRiNWM2ZDdlOGY5MCJ9
         '400':
-          description: Paramètre invalide (`VALIDATION_ERROR`), curseur invalide ou `tag` combiné avec un statut autre que `published` (`BAD_REQUEST`).
+          description: Paramètre invalide ou inconnu, ou `tag` combiné avec un statut autre que `published` (`VALIDATION_ERROR`) ; curseur invalide (`BAD_REQUEST`).
           content:
             application/json:
               schema:
@@ -952,12 +1079,25 @@ paths:
                         - field: limit
                           message: 'Too big: expected number to be <=50'
                     requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+                unknownParameter:
+                  summary: Paramètre de requête inconnu
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Request validation failed
+                      details:
+                        - field: (root)
+                          message: 'Unknown field(s): _'
+                    requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
                 tagWithStatus:
                   summary: tag avec un statut non publié
                   value:
                     error:
-                      code: BAD_REQUEST
-                      message: The tag filter is only available for published posts
+                      code: VALIDATION_ERROR
+                      message: Request validation failed
+                      details:
+                        - field: tag
+                          message: The tag filter is only available for published posts
                     requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '401':
           description: Jeton invalide ou expiré, ou jeton absent alors que `status` n'est pas `published` ou que `author=me` (`UNAUTHORIZED`).
@@ -968,7 +1108,7 @@ paths:
               example:
                 error:
                   code: UNAUTHORIZED
-                  message: Authentication required
+                  message: Authentication is required to list posts whose status is 'draft'
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '403':
           description: Un utilisateur sans la permission `post:read:any` demande les articles non publiés d'un autre auteur (`FORBIDDEN`).
@@ -993,7 +1133,7 @@ paths:
         Crée un article au statut `draft` dont l'appelant est l'auteur.
 
         - Le slug est dérivé du titre et rendu unique par un suffixe (`-2`, `-3`…), sauf si un `slug` personnalisé est fourni (déjà utilisé → `409 SLUG_TAKEN`).
-        - Le résumé est généré à partir du contenu si `excerpt` est absent ou vide ; le temps de lecture est calculé (200 mots/minute).
+        - Le résumé est généré à partir du contenu si `excerpt` est absent, vide ou `null` ; le temps de lecture est calculé (200 mots/minute).
         - Les tags sont normalisés (minuscules, sans accents, mots séparés par des tirets) et dédoublonnés.
 
         Permission `post:create` (tous les rôles).
@@ -1059,16 +1199,26 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
-          description: Le slug personnalisé est déjà utilisé par un autre article (`SLUG_TAKEN`).
+          description: Le slug personnalisé est déjà utilisé par un autre article (`SLUG_TAKEN`), ou une requête concurrente réserve le même slug au même moment (`CONFLICT`, réessayer).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-              example:
-                error:
-                  code: SLUG_TAKEN
-                  message: The slug 'premiers-pas-avec-dynamodb' is already used by another post
-                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+              examples:
+                slugTaken:
+                  summary: Slug déjà utilisé
+                  value:
+                    error:
+                      code: SLUG_TAKEN
+                      message: The slug 'premiers-pas-avec-dynamodb' is already used by another post
+                    requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+                concurrentTransaction:
+                  summary: Transaction concurrente
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: The post is being modified by another request, please retry
+                    requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -1100,6 +1250,11 @@ paths:
               $ref: '#/components/headers/ETag'
             Cache-Control:
               $ref: '#/components/headers/CacheControl'
+            Vary:
+              description: '`Authorization` (article publié uniquement), afin qu''un cache ne serve pas une réponse anonyme à un appelant authentifié.'
+              schema:
+                type: string
+                example: Authorization
           content:
             application/json:
               schema:
@@ -1163,7 +1318,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Slug déjà utilisé (`SLUG_TAKEN`) ou modification concurrente persistante sans `If-Match` (`CONFLICT`).
+          description: Slug déjà utilisé (`SLUG_TAKEN`), ou modification concurrente (`CONFLICT`) persistante sans `If-Match` ou en cours au même moment ; relisez l'article puis réessayez.
           content:
             application/json:
               schema:
@@ -1181,7 +1336,7 @@ paths:
                   value:
                     error:
                       code: CONFLICT
-                      message: The post was modified concurrently, please retry
+                      message: The post was modified by another request, please retry
                     requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '412':
           $ref: '#/components/responses/PreconditionFailed'
@@ -1203,7 +1358,7 @@ paths:
         - L'auteur (`post:delete:own`) peut supprimer son article tant qu'il est `draft` ou `in_review` (sinon `403`).
         - Les éditeurs et administrateurs (`post:delete:any`) peuvent supprimer tout article.
 
-        `If-Match` est facultatif (suppression refusée avec `412` si l'article a changé depuis sa lecture).
+        `If-Match` est facultatif (suppression refusée avec `412` si l'article a changé depuis sa lecture). Sans `If-Match`, une écriture concurrente est retentée une fois, puis signalée par `409 CONFLICT`.
       security:
         - bearerAuth: []
       parameters:
@@ -1220,6 +1375,17 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: Modification concurrente (`CONFLICT`) persistante sans `If-Match` ou en cours au même moment ; relisez l'article puis réessayez.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: The post was modified by another request, please retry
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '412':
           $ref: '#/components/responses/PreconditionFailed'
         '429':
@@ -1289,7 +1455,7 @@ paths:
       description: |-
         Publie un article `draft`, `in_review` ou `archived` : il devient visible publiquement. `publishedAt` est fixé lors de la première publication (et conservé lors d'une republication) ; la note de relecture (`reviewNote`) est effacée.
 
-        Quelques secondes plus tard, de façon asynchrone : l'article est indexé (recherche, tags), les abonnés à la newsletter sont notifiés par e-mail (une seule fois par article) et un événement `PostPublished` est émis sur Amazon EventBridge.
+        Peu après, de façon asynchrone (généralement en moins d'une seconde) : l'article est indexé (recherche, tags), les abonnés à la newsletter sont notifiés par e-mail (une seule fois par article, et seulement s'il est encore publié à ce moment-là) et un événement `PostPublished` est émis sur Amazon EventBridge.
 
         Permission `post:publish` (éditeurs et administrateurs).
       security:
@@ -1500,7 +1666,7 @@ paths:
       description: |-
         Commentaires d'un article, du plus ancien au plus récent. Par défaut, seuls les commentaires approuvés sont renvoyés, dans leur représentation publique (sans adresse e-mail). L'article doit être visible par l'appelant (publié, ou accessible à son auteur et aux éditeurs), sinon `404`.
 
-        Les modérateurs (permission `comment:moderate` : éditeurs et administrateurs) peuvent demander un autre statut (`pending`, `rejected`, `spam` ou `all`) et reçoivent la représentation de modération (`ModeratorComment`).
+        Les modérateurs (permission `comment:moderate` : éditeurs et administrateurs) reçoivent toujours la représentation de modération (`ModeratorComment`) et peuvent demander un autre statut (`pending`, `rejected`, `spam` ou `all`) ; pour tout autre appelant, un tel statut donne `401` sans jeton et `403` avec un jeton.
       security:
         - {}
         - bearerAuth: []
@@ -1519,6 +1685,11 @@ paths:
       responses:
         '200':
           description: Page de commentaires.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -1561,12 +1732,13 @@ paths:
       operationId: createComment
       summary: Commenter un article
       description: |-
-        Ajoute un commentaire à un article publié dont les commentaires sont ouverts (`allowComments`).
+        Ajoute un commentaire à un article publié dont les commentaires sont ouverts (`allowComments`). L'article doit encore être publié au moment de l'écriture : un article inexistant, non publié, ou supprimé ou dépublié au même moment donne `404`.
 
-        - **Anonyme** : `authorName` est obligatoire et `authorEmail` facultatif (jamais affiché publiquement). Le commentaire attend une modération (`pending`).
-        - **Connecté** (jeton facultatif) : le nom et l'e-mail du compte sont utilisés (`authorName` et `authorEmail` sont ignorés) ; le commentaire d'un utilisateur ayant un rôle est approuvé immédiatement (`approved`).
+        - **Anonyme** : `authorName` est obligatoire et `authorEmail` facultatif (jamais affiché publiquement).
+        - **Connecté** (jeton facultatif) : le nom et l'e-mail du compte sont utilisés (`authorName` et `authorEmail` sont ignorés).
+        - Seuls les commentaires des modérateurs (éditeurs et administrateurs) sont approuvés immédiatement (`approved`) ; tous les autres (lecteurs anonymes, auteurs invités, comptes sans rôle) attendent une modération (`pending`).
 
-        `parentId` permet de répondre à un commentaire approuvé du même article. Le champ `website` doit rester vide (champ anti-spam à masquer dans les formulaires). Limite de débit renforcée (5 requêtes/s).
+        `parentId` permet de répondre à un commentaire approuvé du même article. Le champ `website` doit rester vide (champ anti-spam à masquer dans les formulaires) : rempli, il fait classer le commentaire en spam, avec la même réponse qu'un commentaire en attente. Lorsque DynamoDB limite les écritures, la réponse est `503 SERVICE_UNAVAILABLE` avec `Retry-After`. Limite de débit renforcée (5 requêtes/s).
       security:
         - {}
         - bearerAuth: []
@@ -1592,10 +1764,13 @@ paths:
                   parentId: 0192f4b0-1a2b-7c3d-8e4f-5a6b7c8d9e0f
       responses:
         '201':
-          description: Commentaire enregistré (`pending` s'il doit être modéré, `approved` sinon).
+          description: Commentaire enregistré (`approved` pour un modérateur, `pending` sinon).
           headers:
             Location:
-              $ref: '#/components/headers/Location'
+              description: Chemin du commentaire créé (`/posts/{postId}/comments/{commentId}`), relatif à l'hôte de l'API, préfixe de déploiement compris.
+              schema:
+                type: string
+                example: /dev/posts/0192f4a0-5b1c-7d2e-8f3a-4b5c6d7e8f90/comments/0192f4b0-1a2b-7c3d-8e4f-5a6b7c8d9e0f
           content:
             application/json:
               schema:
@@ -1613,8 +1788,8 @@ paths:
                       name: Lectrice
                     status: pending
                     createdAt: '2026-10-23T10:12:45.000Z'
-                approved:
-                  summary: Réponse d'un utilisateur connecté, approuvée d'office
+                memberPending:
+                  summary: Réponse d'un auteur invité connecté, en attente de modération
                   value:
                     id: 0192f4b1-2c3d-7e4f-9a5b-6c7d8e9f0a1b
                     postId: 0192f4a0-5b1c-7d2e-8f3a-4b5c6d7e8f90
@@ -1623,10 +1798,22 @@ paths:
                     author:
                       id: 3f8a2b1c-4d5e-4f60-8a7b-9c0d1e2f3a4b
                       name: Gaby Martin
-                    status: approved
+                    status: pending
                     createdAt: '2026-10-23T11:02:10.000Z'
+                approved:
+                  summary: Commentaire d'un éditeur, approuvé d'office
+                  value:
+                    id: 0192f4b2-3d4e-7f5a-8b6c-7d8e9f0a1b2c
+                    postId: 0192f4a0-5b1c-7d2e-8f3a-4b5c6d7e8f90
+                    parentId: null
+                    body: Mise à jour, le schéma est maintenant disponible en haute résolution.
+                    author:
+                      id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                      name: Eddie Durand
+                    status: approved
+                    createdAt: '2026-10-23T11:20:00.000Z'
         '400':
-          description: Données invalides (`VALIDATION_ERROR`, par exemple `authorName` manquant pour un commentaire anonyme) ou `parentId` qui ne désigne pas un commentaire approuvé de cet article (`INVALID_PARENT`).
+          description: Données invalides (`VALIDATION_ERROR`, par exemple `authorName` manquant pour un commentaire anonyme ou identifiant mal formé) ou `parentId` qui ne désigne pas un commentaire approuvé de cet article (`INVALID_PARENT`).
           content:
             application/json:
               schema:
@@ -1663,13 +1850,26 @@ paths:
                   message: Comments are disabled for this post
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: Article inexistant ou non publié, y compris s'il vient d'être supprimé ou dépublié (`NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: Post not found
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+        '409':
+          $ref: '#/components/responses/CommentConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '5XX':
           $ref: '#/components/responses/ServerError'
 
@@ -1726,16 +1926,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Le commentaire a été modéré simultanément par quelqu'un d'autre (`CONFLICT`) ; relisez-le puis réessayez.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-              example:
-                error:
-                  code: CONFLICT
-                  message: The comment was moderated concurrently, please retry
-                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+          $ref: '#/components/responses/CommentConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -1748,7 +1939,7 @@ paths:
       tags: [Commentaires]
       operationId: deleteComment
       summary: Supprimer un commentaire
-      description: Supprime définitivement un commentaire (et décrémente `commentCount` s'il était approuvé). Autorisé aux modérateurs (`comment:moderate`) et à l'auteur connecté du commentaire.
+      description: Supprime définitivement un commentaire (et décrémente `commentCount` s'il était approuvé). Autorisé aux modérateurs (`comment:moderate`) et à l'auteur connecté du commentaire ; pour tout autre utilisateur, un commentaire non approuvé est signalé comme inexistant (`404`).
       security:
         - bearerAuth: []
       parameters:
@@ -1765,6 +1956,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CommentConflict'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '5XX':
@@ -1795,6 +1988,11 @@ paths:
       responses:
         '200':
           description: Page de la file de modération.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -1848,7 +2046,10 @@ paths:
           description: Média enregistré (`pending`) et autorisation de téléversement.
           headers:
             Location:
-              $ref: '#/components/headers/Location'
+              description: Chemin du média créé (`GET /media/{mediaId}`), relatif à l'hôte de l'API, préfixe de déploiement compris.
+              schema:
+                type: string
+                example: /dev/media/0192f4c2-3d4e-7f5a-8b6c-7d8e9f0a1b2c
           content:
             application/json:
               schema:
@@ -1868,7 +2069,7 @@ paths:
               example:
                 error:
                   code: PAYLOAD_TOO_LARGE
-                  message: Images must not exceed 10485760 bytes
+                  message: The maximum size of image files is 10 MB (10485760 bytes)
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '415':
           description: Type de fichier non pris en charge (SVG, PDF…), ou corps de requête qui n'est pas en JSON (`UNSUPPORTED_MEDIA_TYPE`).
@@ -1879,7 +2080,7 @@ paths:
               example:
                 error:
                   code: UNSUPPORTED_MEDIA_TYPE
-                  message: 'Unsupported content type image/svg+xml'
+                  message: "Unsupported content type 'image/svg+xml' (accepted: image/jpeg, image/png, image/gif, image/webp, image/avif, video/mp4, video/webm, video/quicktime)"
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '429':
           $ref: '#/components/responses/TooManyRequests'
@@ -1899,7 +2100,7 @@ paths:
         - name: owner
           in: query
           required: false
-          description: Propriétaire des médias, `me` ou identifiant (`sub` Cognito) d'un utilisateur. Par défaut, les médias de l'appelant (ou toute la médiathèque pour les éditeurs et administrateurs).
+          description: Propriétaire des médias, `me` ou identifiant (`sub` Cognito, UUID) d'un utilisateur ; toute autre valeur est refusée (`400`). Par défaut, les médias de l'appelant (ou toute la médiathèque pour les éditeurs et administrateurs).
           schema:
             type: string
             minLength: 1
@@ -1907,6 +2108,11 @@ paths:
       responses:
         '200':
           description: Page de médias.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -1930,7 +2136,7 @@ paths:
       description: |-
         Détails d'un média. Un média `ready` est public ; un média `pending` ou `rejected` n'est visible que de son propriétaire et des éditeurs et administrateurs (sinon `404`).
 
-        `url` est l'URL CloudFront permanente du fichier, ou, sans CDN, une URL S3 présignée temporaire (voir `urlExpiresAt`).
+        `url` est l'URL CloudFront permanente du fichier (CloudFront ne diffuse que les fichiers validés), ou, sans CDN, une URL S3 présignée temporaire (voir `urlExpiresAt`). Un média `ready` lu anonymement est cachable.
       security:
         - {}
         - bearerAuth: []
@@ -1939,6 +2145,14 @@ paths:
       responses:
         '200':
           description: Média.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Vary:
+              description: '`Authorization` (média `ready` uniquement), afin qu''un cache ne serve pas une réponse anonyme à un appelant authentifié.'
+              schema:
+                type: string
+                example: Authorization
           content:
             application/json:
               schema:
@@ -1991,9 +2205,11 @@ paths:
                     owner:
                       id: 3f8a2b1c-4d5e-4f60-8a7b-9c0d1e2f3a4b
                       name: Gaby Martin
-                    rejectionReason: The file content does not match the declared type image/png
+                    rejectionReason: 'File content is not a valid image/png file (detected: unknown format)'
                     createdAt: '2026-10-24T16:40:00.000Z'
                     updatedAt: '2026-10-24T16:40:03.000Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -2006,7 +2222,7 @@ paths:
       tags: [Médias]
       operationId: updateMedia
       summary: Modifier le texte alternatif d'un média
-      description: Modifie le texte alternatif (accessibilité) d'un média ; `null` le supprime. Autorisé au propriétaire (permission `media:upload`) ainsi qu'aux éditeurs et administrateurs (`media:delete:any`).
+      description: Modifie le texte alternatif (accessibilité) d'un média ; `null` ou une chaîne vide le supprime. Autorisé au propriétaire (permission `media:upload`) ainsi qu'aux éditeurs et administrateurs (`media:delete:any`).
       security:
         - bearerAuth: []
       parameters:
@@ -2046,7 +2262,7 @@ paths:
       tags: [Médias]
       operationId: deleteMedia
       summary: Supprimer un média
-      description: Supprime le fichier S3 puis le média. Autorisé au propriétaire (permission `media:upload`) ainsi qu'aux éditeurs et administrateurs (`media:delete:any`). Les articles qui utilisent son URL ne sont pas modifiés.
+      description: Supprime le fichier S3 puis le média. Autorisé au propriétaire (permission `media:upload`) ainsi qu'aux éditeurs et administrateurs (`media:delete:any`). Les articles qui utilisent son URL ne sont pas modifiés, et une copie peut rester dans le cache de CloudFront (24 heures au plus par défaut).
       security:
         - bearerAuth: []
       parameters:
@@ -2054,6 +2270,8 @@ paths:
       responses:
         '204':
           description: Média supprimé.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2078,7 +2296,7 @@ paths:
 
         Les résultats sont classés par nombre de termes trouvés, puis par score de pertinence (terme du titre +10, d'un tag +6, du résumé +3, du contenu +1 par occurrence jusqu'à +5), puis par date de publication. Une requête sans terme significatif renvoie une liste vide.
 
-        L'index est mis à jour de façon asynchrone, quelques secondes après une publication. Réponse cachable 60 secondes.
+        L'index est mis à jour de façon asynchrone, généralement moins d'une seconde après une publication ou une modification. Réponse publique cachable 60 secondes.
       security: []
       parameters:
         - name: q
@@ -2096,10 +2314,12 @@ paths:
           description: Résultats de recherche (les `limit` meilleurs).
           headers:
             Cache-Control:
-              description: Réponse publique cachable 60 secondes.
+              description: Réponse publique cachable 60 secondes, puis encore servie au plus 300 secondes pendant sa revalidation.
               schema:
                 type: string
-                example: 'public, max-age=60'
+                example: 'public, max-age=60, stale-while-revalidate=300'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -2116,21 +2336,37 @@ paths:
       tags: [Recherche]
       operationId: listTags
       summary: Lister les tags
-      description: Tags des articles publiés avec leur nombre d'articles, du plus utilisé au moins utilisé puis par ordre alphabétique (nuage de tags). Mis à jour de façon asynchrone ; réponse cachable 5 minutes.
+      description: Tags des articles publiés avec leur nombre d'articles, du plus utilisé au moins utilisé puis par ordre alphabétique (nuage de tags). Mis à jour de façon asynchrone ; réponse publique cachable 5 minutes. Cette route n'accepte aucun paramètre de requête.
       security: []
       responses:
         '200':
           description: Tags utilisés par au moins un article publié.
           headers:
             Cache-Control:
-              description: Réponse publique cachable 5 minutes.
+              description: Réponse publique cachable 5 minutes, puis encore servie au plus 25 minutes pendant sa revalidation.
               schema:
                 type: string
-                example: 'public, max-age=300'
+                example: 'public, max-age=300, stale-while-revalidate=1500'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TagList'
+        '400':
+          description: Paramètre de requête présent, alors que cette route n'en accepte aucun (`VALIDATION_ERROR`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    - field: (root)
+                      message: 'Unknown field(s): limit'
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '5XX':
@@ -2147,7 +2383,9 @@ paths:
       description: |-
         Abonne une adresse e-mail aux annonces des nouveaux articles (Amazon SNS). SNS envoie un e-mail de confirmation (double opt-in) : l'abonnement n'est actif qu'après un clic sur le lien qu'il contient. Chaque annonce comporte un lien de désabonnement.
 
-        Avec `tags`, seuls les articles portant au moins l'un de ces tags sont annoncés (politique de filtrage SNS) ; sans `tags`, tous les articles le sont. Limite de débit renforcée (2 requêtes/s).
+        Avec `tags`, seuls les articles portant au moins l'un de ces tags sont annoncés (politique de filtrage SNS) ; sans `tags`, tous les articles le sont.
+
+        Une adresse déjà abonnée, avec les mêmes tags ou d'autres, reçoit la même réponse `202`, afin de ne pas révéler qui est abonné ; elle conserve ses préférences d'origine (se désabonner pour les changer). Limite de débit renforcée (2 requêtes/s).
       security: []
       requestBody:
         required: true
@@ -2167,13 +2405,13 @@ paths:
                   tags: [Serverless, DynamoDB]
       responses:
         '202':
-          description: Demande enregistrée, confirmation à effectuer depuis l'e-mail reçu.
+          description: Demande enregistrée, confirmation à effectuer depuis l'e-mail reçu (même réponse pour une adresse déjà abonnée).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SubscriptionPending'
         '400':
-          description: Données invalides (`VALIDATION_ERROR`) ou adresse refusée par Amazon SNS (`BAD_REQUEST`).
+          description: Données invalides (`VALIDATION_ERROR`) ou demande refusée par Amazon SNS (`INVALID_PARAMETER`).
           content:
             application/json:
               schema:
@@ -2181,16 +2419,23 @@ paths:
               examples:
                 invalidEmail:
                   $ref: '#/components/examples/InvalidEmail'
+                rejectedBySns:
+                  summary: Demande refusée par Amazon SNS
+                  value:
+                    error:
+                      code: INVALID_PARAMETER
+                      message: Invalid subscription request
+                    requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '409':
-          description: Cette adresse est déjà abonnée avec des préférences différentes (`ALREADY_SUBSCRIBED`).
+          description: Le quota d'abonnements filtrés par tags (politiques de filtrage Amazon SNS) est atteint ; abonnez-vous sans `tags` (`TAG_SUBSCRIPTIONS_FULL`).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
               example:
                 error:
-                  code: ALREADY_SUBSCRIBED
-                  message: This e-mail address is already subscribed
+                  code: TAG_SUBSCRIPTIONS_FULL
+                  message: Tag-filtered subscriptions are full, please subscribe without tags
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
@@ -2198,6 +2443,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/NewsletterUnavailable'
         '5XX':
           $ref: '#/components/responses/ServerError'
     get:
@@ -2212,6 +2459,11 @@ paths:
       responses:
         '200':
           description: Page d'abonnements.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPrivate'
+            Vary:
+              $ref: '#/components/headers/Vary'
           content:
             application/json:
               schema:
@@ -2224,6 +2476,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/NewsletterUnavailable'
         '5XX':
           $ref: '#/components/responses/ServerError'
 
@@ -2242,10 +2496,10 @@ paths:
           description: Page HTML Swagger UI.
           headers:
             Cache-Control:
-              description: Page cachable 5 minutes.
+              description: Page cachable 1 heure.
               schema:
                 type: string
-                example: 'public, max-age=300'
+                example: 'public, max-age=3600'
             Content-Security-Policy:
               description: Politique de sécurité du contenu (scripts limités au CDN de Swagger UI et au script d'initialisation de la page).
               schema:
@@ -2332,7 +2586,7 @@ components:
       description: |-
         Jeton d'identité **Amazon Cognito** (Cognito ID token, JWT signé RS256), champ `idToken` des réponses de `POST /auth/login`, `POST /auth/refresh` et `POST /auth/new-password`, envoyé dans l'en-tête `Authorization: Bearer <idToken>`.
 
-        L'access token est refusé : seul l'ID token porte les claims `email`, `name` et `cognito:groups` (rôles) utilisés par l'API. Validité : 60 minutes.
+        L'access token est refusé : seul l'ID token porte les claims `email`, `name` et `cognito:groups` (rôles) utilisés par l'API. Validité : 60 minutes ; sur les routes protégées, la vérification est mise en cache 300 secondes par jeton, qui reste donc accepté jusqu'à 5 minutes après son expiration.
 
   parameters:
     PostIdOrSlug:
@@ -2355,7 +2609,7 @@ components:
       name: postId
       in: path
       required: true
-      description: Identifiant (UUID) de l'article.
+      description: Identifiant (UUID) de l'article ; une autre valeur, slug compris, est refusée (`400 VALIDATION_ERROR`).
       schema:
         type: string
         format: uuid
@@ -2364,7 +2618,7 @@ components:
       name: commentId
       in: path
       required: true
-      description: Identifiant (UUID) du commentaire.
+      description: Identifiant (UUID) du commentaire ; mal formé → `400 VALIDATION_ERROR`.
       schema:
         type: string
         format: uuid
@@ -2373,7 +2627,7 @@ components:
       name: mediaId
       in: path
       required: true
-      description: Identifiant (UUID) du média.
+      description: Identifiant (UUID) du média ; mal formé → `400 VALIDATION_ERROR`.
       schema:
         type: string
         format: uuid
@@ -2382,7 +2636,7 @@ components:
       name: userId
       in: path
       required: true
-      description: Identifiant de l'utilisateur (`sub` Cognito, UUID).
+      description: Identifiant de l'utilisateur (`sub` Cognito, UUID) ; mal formé → `400 VALIDATION_ERROR`.
       schema:
         type: string
         format: uuid
@@ -2444,16 +2698,37 @@ components:
         type: string
         example: '"v4"'
     Location:
-      description: Chemin de la ressource créée (relatif à l'URL de base de l'API).
+      description: >-
+        Chemin de la ressource créée, relatif à l'hôte de l'API et préfixe de déploiement compris : stage sur l'URL `execute-api` (`/dev/posts/…`), chemin de base sur un domaine personnalisé. Il se résout donc directement contre l'URL de la requête.
       schema:
         type: string
-        example: /posts/0192f6e1-8a2b-7c3d-9e4f-5a6b7c8d9e0f
+        example: /dev/posts/0192f6e1-8a2b-7c3d-9e4f-5a6b7c8d9e0f
     CacheControl:
       description: |-
         `public, max-age=60, stale-while-revalidate=300` pour un appel anonyme sur un contenu public ; `private, no-store` dès qu'un jeton est fourni ou que le contenu n'est pas public.
       schema:
         type: string
         example: 'public, max-age=60, stale-while-revalidate=300'
+    CacheControlPrivate:
+      description: Toujours `private, no-store` (réponse propre à l'appelant, à ne pas mettre en cache).
+      schema:
+        type: string
+        example: 'private, no-store'
+    CacheControlNoStore:
+      description: Toujours `no-store` (réponse contenant des jetons ou une session, à ne jamais mettre en cache).
+      schema:
+        type: string
+        example: no-store
+    Pragma:
+      description: Toujours `no-cache` (pour les caches HTTP/1.0, comme le recommande la RFC 6749).
+      schema:
+        type: string
+        example: no-cache
+    Vary:
+      description: '`Authorization` : un cache doit distinguer les requêtes selon leur jeton, afin de ne pas servir une réponse anonyme à un appelant authentifié.'
+      schema:
+        type: string
+        example: Authorization
     RetryAfter:
       description: Délai conseillé, en secondes, avant de réessayer (réponses `503`).
       schema:
@@ -2481,26 +2756,26 @@ components:
       value:
         error:
           code: INVALID_PASSWORD
-          message: 'Password did not conform with policy: Password must have uppercase characters'
+          message: The password does not satisfy the password policy
         requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     InvalidCode:
-      summary: Code incorrect (INVALID_CODE)
+      summary: Code incorrect ou compte inconnu (INVALID_CODE)
       value:
         error:
           code: INVALID_CODE
-          message: Invalid verification code provided, please try again.
+          message: Invalid verification code
         requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     ExpiredCode:
       summary: Code expiré (EXPIRED_CODE)
       value:
         error:
           code: EXPIRED_CODE
-          message: Invalid code provided, please request a code again.
+          message: The verification code has expired, please request a new one
         requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
 
   responses:
     BadRequest:
-      description: Requête invalide. `VALIDATION_ERROR` (avec `details`) pour un corps ou des paramètres non conformes, champ inconnu compris ; `BAD_REQUEST` pour un JSON mal formé, un curseur de pagination ou un en-tête `If-Match` invalide.
+      description: Requête invalide. `VALIDATION_ERROR` (avec `details`) pour un corps, un paramètre de requête ou un identifiant du chemin non conformes, champ ou paramètre inconnu compris ; `BAD_REQUEST` pour un JSON mal formé, un curseur de pagination ou un en-tête `If-Match` invalide.
       content:
         application/json:
           schema:
@@ -2514,9 +2789,29 @@ components:
                   message: Request validation failed
                   details:
                     - field: title
-                      message: 'Too small: expected string to have >=1 characters'
+                      message: Title is required
                     - field: (root)
                       message: 'Unknown field(s): status'
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+            invalidPathId:
+              summary: Identifiant mal formé dans le chemin (VALIDATION_ERROR)
+              value:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    - field: postId
+                      message: Must be a valid identifier (UUID)
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+            unknownQueryParameter:
+              summary: Paramètre de requête inconnu (VALIDATION_ERROR)
+              value:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    - field: (root)
+                      message: 'Unknown field(s): _'
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
             malformedJson:
               summary: JSON mal formé (BAD_REQUEST)
@@ -2533,7 +2828,7 @@ components:
                   message: Invalid pagination cursor
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     Unauthorized:
-      description: Jeton absent, mal formé, invalide ou expiré (`UNAUTHORIZED`). Obtenez un ID token avec `POST /auth/login` ou `POST /auth/refresh`.
+      description: Jeton absent, mal formé, invalide ou expiré (`UNAUTHORIZED`). Obtenez un ID token avec `POST /auth/login` ou `POST /auth/refresh`. Sur les routes protégées, le refus vient de l'authorizer d'API Gateway (en-tête `WWW-Authenticate`) ; sur les routes à jeton facultatif, de la fonction elle-même.
       headers:
         WWW-Authenticate:
           $ref: '#/components/headers/WwwAuthenticate'
@@ -2555,10 +2850,10 @@ components:
           example:
             error:
               code: INVALID_TOKEN
-              message: Invalid or expired refresh token
+              message: Invalid, expired or revoked token
             requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     Forbidden:
-      description: L'appelant est authentifié mais son rôle n'accorde pas la permission nécessaire (`FORBIDDEN`).
+      description: L'appelant est authentifié mais n'a pas la permission nécessaire (`FORBIDDEN`) — rôle insuffisant, ressource d'un autre utilisateur, ou statut qui ne permet plus l'action à son rôle.
       content:
         application/json:
           schema:
@@ -2580,7 +2875,7 @@ components:
               message: Resource not found
             requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     WorkflowConflict:
-      description: Transition impossible depuis le statut actuel de l'article (`INVALID_STATE_TRANSITION`), ou modification concurrente persistante sans `If-Match` (`CONFLICT`).
+      description: Transition impossible depuis le statut actuel de l'article (`INVALID_STATE_TRANSITION`), ou modification concurrente (`CONFLICT`) persistante sans `If-Match` ou en cours au même moment.
       content:
         application/json:
           schema:
@@ -2598,7 +2893,7 @@ components:
               value:
                 error:
                   code: CONFLICT
-                  message: The post was modified concurrently, please retry
+                  message: The post was modified by another request, please retry
                 requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     UserExists:
       description: Un compte existe déjà pour cette adresse e-mail (`USER_EXISTS`).
@@ -2610,6 +2905,99 @@ components:
             error:
               code: USER_EXISTS
               message: An account already exists for this e-mail address
+            requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    AdminForbidden:
+      description: >-
+        Permission `user:manage` manquante, ou appelant qui n'est plus un administrateur actif dans Amazon Cognito (compte désactivé, supprimé ou rétrogradé), même si son jeton est encore valide (`FORBIDDEN`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingPermission:
+              summary: Rôle sans la permission user:manage
+              value:
+                error:
+                  code: FORBIDDEN
+                  message: You do not have permission to perform this action
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+            revoked:
+              summary: Administrateur désactivé ou rétrogradé depuis l'émission du jeton
+              value:
+                error:
+                  code: FORBIDDEN
+                  message: Your administrator rights have been revoked
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    AccountOperationRefused:
+      description: Opération refusée par Amazon Cognito pour ce compte, par exemple un compte désactivé (`INVALID_CREDENTIALS`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: INVALID_CREDENTIALS
+              message: This operation is not allowed for this account
+            requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    CommentConflict:
+      description: Écritures simultanées (`CONFLICT`) ; le commentaire a été modifié par une autre requête, ou l'article reçoit trop d'écritures concurrentes. Relisez puis réessayez.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            commentChanged:
+              summary: Commentaire modifié par une autre requête
+              value:
+                error:
+                  code: CONFLICT
+                  message: The comment was changed by a concurrent request, please retry
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+            busyPost:
+              summary: Trop d'écritures concurrentes sur l'article
+              value:
+                error:
+                  code: CONFLICT
+                  message: Too many concurrent updates of this post, please retry
+                requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    ServiceUnavailable:
+      description: Écriture limitée par Amazon DynamoDB (`SERVICE_UNAVAILABLE`) ; réessayez après le délai indiqué par `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: SERVICE_UNAVAILABLE
+              message: The service is busy, please retry shortly
+            requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    NewsletterUnavailable:
+      description: Amazon SNS momentanément saturé, ou quota d'abonnements atteint (`SERVICE_UNAVAILABLE`) ; réessayez après le délai indiqué par `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: SERVICE_UNAVAILABLE
+              message: The newsletter service is busy, please retry later
+            requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
+    UnsupportedChallenge:
+      description: Cognito exige un défi d'authentification que l'API ne sait pas traiter, par exemple une authentification multifacteur (MFA, non activée sur le user pool déployé) (`UNSUPPORTED_CHALLENGE`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: UNSUPPORTED_CHALLENGE
+              message: The authentication challenge SOFTWARE_TOKEN_MFA is not supported by this API
             requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     PreconditionFailed:
       description: >-
@@ -2659,7 +3047,7 @@ components:
             requestId: c0a8012e-5f3b-4a1d-9e7c-2b8d4f6a1c3e
     ServerError:
       description: |-
-        Erreur côté serveur : `500 INTERNAL_ERROR` (erreur inattendue, sans détail interne : communiquez le `requestId`), `503 SERVICE_UNAVAILABLE` (service AWS momentanément saturé, réessayer après `Retry-After` secondes), `502`/`504` (échec ou dépassement de délai de la fonction, renvoyés par API Gateway).
+        Erreur côté serveur : `500 INTERNAL_ERROR` (erreur inattendue, sans détail interne : communiquez le `requestId`), `503 SERVICE_UNAVAILABLE` (service AWS momentanément saturé, ou clés publiques de Cognito inaccessibles pour vérifier un jeton facultatif : réessayer après `Retry-After` secondes), `500 AUTHORIZER_FAILURE` (authorizer indisponible sur une route protégée), `502`/`504` (échec ou dépassement de délai de la fonction, renvoyés par API Gateway).
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -2717,11 +3105,11 @@ components:
       properties:
         field:
           type: string
-          description: Chemin du champ en erreur (`tags.2` pour un élément de tableau, `(root)` pour l'objet entier, par exemple un champ inconnu).
+          description: Chemin du champ ou du paramètre en erreur (`tags.2` pour un élément de tableau, `(root)` pour l'objet entier, par exemple un champ ou un paramètre de requête inconnu).
           example: title
         message:
           type: string
-          example: 'Too small: expected string to have >=1 characters'
+          example: Title is required
     Message:
       type: object
       required: [message]
@@ -2782,7 +3170,7 @@ components:
           example: 3f8a2b1c-4d5e-4f60-8a7b-9c0d1e2f3a4b
         name:
           type: string
-          description: Nom affiché (au moment de la création de la ressource).
+          description: Nom affiché au moment de la création de la ressource ; `Anonymous` si le compte n'avait pas de nom (jamais dérivé de l'adresse e-mail).
           example: Gaby Martin
     UserProfile:
       type: object
@@ -2796,10 +3184,11 @@ components:
         email:
           type: string
           format: email
+          nullable: true
+          description: Adresse e-mail du compte (issue du jeton), `null` si elle est inconnue.
         name:
           type: string
-          maxLength: 80
-          description: Nom affiché.
+          description: Nom affiché (celui du profil, sinon celui du compte ; `Anonymous` à défaut, jamais dérivé de l'adresse e-mail).
         role:
           type: string
           enum: [admin, editor, guest-author, null]
@@ -2883,6 +3272,7 @@ components:
           format: uuid
         name:
           type: string
+          description: Nom affiché (`Anonymous` si le compte n'a pas de nom).
         bio:
           type: string
           nullable: true
@@ -2902,12 +3292,13 @@ components:
         website: https://gaby.example.com
     CognitoUserStatus:
       type: string
-      enum: [UNCONFIRMED, CONFIRMED, ARCHIVED, COMPROMISED, UNKNOWN, RESET_REQUIRED, FORCE_CHANGE_PASSWORD, EXTERNAL_PROVIDER]
-      description: Statut du compte dans Amazon Cognito (`FORCE_CHANGE_PASSWORD` tant qu'un utilisateur invité n'a pas choisi son mot de passe).
+      enum: [UNCONFIRMED, CONFIRMED, ARCHIVED, COMPROMISED, UNKNOWN, RESET_REQUIRED, FORCE_CHANGE_PASSWORD, EXTERNAL_PROVIDER, null]
+      nullable: true
+      description: Statut du compte dans Amazon Cognito (`FORCE_CHANGE_PASSWORD` tant qu'un utilisateur invité n'a pas choisi son mot de passe), `null` si Cognito ne le fournit pas.
       example: CONFIRMED
     AdminUser:
       type: object
-      description: Compte utilisateur vu par un administrateur.
+      description: Compte utilisateur vu par un administrateur. Les attributs absents du compte Cognito (par exemple le nom d'un compte créé dans la console sans attribut `name`) valent `null`.
       required: [id, email, name, status, enabled, role, createdAt, updatedAt]
       properties:
         id:
@@ -2917,8 +3308,11 @@ components:
         email:
           type: string
           format: email
+          nullable: true
         name:
           type: string
+          nullable: true
+          description: Attribut `name` du compte Cognito, `null` s'il est absent.
         status:
           $ref: '#/components/schemas/CognitoUserStatus'
         enabled:
@@ -2928,13 +3322,15 @@ components:
           type: string
           enum: [admin, editor, guest-author, null]
           nullable: true
-          description: Rôle principal, `null` pour un compte sans groupe.
+          description: Rôle principal (le plus élevé), `null` pour un compte sans groupe.
         createdAt:
           type: string
           format: date-time
+          nullable: true
         updatedAt:
           type: string
           format: date-time
+          nullable: true
       example:
         id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
         email: eddie.durand@example.com
@@ -3039,7 +3435,9 @@ components:
         code:
           type: string
           minLength: 1
-          description: Code de vérification reçu par e-mail.
+          maxLength: 64
+          pattern: '^\S+$'
+          description: Code de vérification reçu par e-mail, sans espace.
           example: '123456'
       example:
         email: gaby.martin@example.com
@@ -3074,7 +3472,7 @@ components:
           format: password
           minLength: 1
           maxLength: 256
-          description: Mot de passe (ou mot de passe temporaire reçu par e-mail).
+          description: Mot de passe (ou mot de passe temporaire reçu par e-mail). La politique de mot de passe n'est pas vérifiée ici ; un mot de passe incorrect donne `401`.
       example:
         email: gaby.martin@example.com
         password: Blogify2026!
@@ -3124,7 +3522,9 @@ components:
         refreshToken:
           type: string
           minLength: 1
-          description: Refresh token reçu à la connexion.
+          maxLength: 8192
+          pattern: '^[A-Za-z0-9_.-]+$'
+          description: Refresh token reçu à la connexion (chaîne opaque de lettres, chiffres, `_`, `.` et `-`).
       example:
         refreshToken: eyJjdHkiOiJKV1QiLCJlbmMiOiJBMjU2R0NNIiwiYWxnIjoiUlNBLU9BRVAifQ.ZXhhbXBsZS1rZXk.ZXhhbXBsZS1pdg.ZXhhbXBsZS1jaXBoZXJ0ZXh0.ZXhhbXBsZS10YWc
     NewPasswordRequest:
@@ -3139,6 +3539,7 @@ components:
         session:
           type: string
           minLength: 1
+          maxLength: 2048
           description: Valeur `session` du défi `NEW_PASSWORD_REQUIRED`.
       example:
         email: eddie.durand@example.com
@@ -3154,7 +3555,9 @@ components:
         code:
           type: string
           minLength: 1
-          description: Code reçu par e-mail.
+          maxLength: 64
+          pattern: '^\S+$'
+          description: Code reçu par e-mail, sans espace.
           example: '654321'
         newPassword:
           $ref: '#/components/schemas/Password'
@@ -3183,7 +3586,7 @@ components:
           type: string
           maxLength: 80
           pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
-          description: Identifiant lisible et unique, utilisable à la place de l'identifiant dans `GET /posts/{postId}`.
+          description: Identifiant lisible et unique (jamais de la forme d'un UUID), utilisable à la place de l'identifiant dans `GET /posts/{postId}`.
         title:
           type: string
           maxLength: 200
@@ -3216,7 +3619,7 @@ components:
         commentCount:
           type: integer
           minimum: 0
-          description: Nombre de commentaires approuvés.
+          description: Nombre de commentaires approuvés (dans la liste par tag, copie mise à jour de façon asynchrone, généralement en moins d'une seconde).
         reviewNote:
           type: string
           nullable: true
@@ -3323,7 +3726,8 @@ components:
         excerpt:
           type: string
           maxLength: 500
-          description: Résumé personnalisé ; absent ou vide, il est généré à partir du contenu.
+          nullable: true
+          description: Résumé personnalisé ; absent, vide ou `null`, il est généré à partir du contenu.
         tags:
           type: array
           maxItems: 10
@@ -3336,7 +3740,7 @@ components:
           type: string
           maxLength: 80
           pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
-          description: Slug personnalisé (minuscules, chiffres et tirets) ; par défaut, dérivé du titre.
+          description: Slug personnalisé (minuscules, chiffres et tirets), qui ne doit pas avoir la forme d'un UUID (réservée aux identifiants) ; par défaut, dérivé du titre.
         coverImageUrl:
           type: string
           format: uri
@@ -3378,7 +3782,7 @@ components:
           type: string
           maxLength: 80
           pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
-          description: Nouveau slug (l'ancien est libéré).
+          description: Nouveau slug (l'ancien est libéré), qui ne doit pas avoir la forme d'un UUID.
         coverImageUrl:
           type: string
           format: uri
@@ -3395,7 +3799,8 @@ components:
         note:
           type: string
           maxLength: 1000
-          description: Motif du rejet, communiqué à l'auteur dans `reviewNote`.
+          nullable: true
+          description: Motif du rejet, communiqué à l'auteur dans `reviewNote` (`null` ou vide = sans motif).
     EmptyRequest:
       type: object
       description: Corps facultatif, vide ou objet JSON vide (`{}`) ; tout champ est refusé.
@@ -3420,8 +3825,7 @@ components:
           description: Identifiant de l'auteur connecté, `null` pour un commentaire anonyme.
         name:
           type: string
-          maxLength: 80
-          description: Nom affiché.
+          description: Nom affiché, `authorName` d'un anonyme ou nom du compte connecté (`Anonymous` si le compte n'a pas de nom).
     Comment:
       type: object
       description: Représentation publique d'un commentaire (l'adresse e-mail de l'auteur n'est jamais exposée).
@@ -3475,7 +3879,8 @@ components:
               description: E-mail de l'auteur (fourni par un anonyme ou issu du compte), `null` si inconnu.
             postTitle:
               type: string
-              description: Titre de l'article commenté.
+              nullable: true
+              description: Titre de l'article au moment du commentaire, `null` s'il est inconnu.
             moderatedBy:
               type: string
               format: uuid
@@ -3550,14 +3955,16 @@ components:
           type: string
           format: email
           maxLength: 254
-          description: E-mail facultatif d'un auteur anonyme, visible des seuls modérateurs (ignoré avec un jeton).
+          description: E-mail facultatif d'un auteur anonyme, visible des seuls modérateurs (ignoré avec un jeton) ; une chaîne vide équivaut à son absence.
         parentId:
           type: string
           format: uuid
-          description: Commentaire **approuvé** du même article auquel on répond.
+          nullable: true
+          description: Commentaire **approuvé** du même article auquel on répond ; `null` ou vide pour un commentaire de premier niveau.
         website:
           type: string
-          description: Champ anti-spam qui doit rester vide (à masquer dans les formulaires).
+          nullable: true
+          description: Champ anti-spam qui doit rester vide ou `null` (à masquer dans les formulaires) ; rempli, le commentaire est classé comme spam.
     CommentModerationRequest:
       type: object
       additionalProperties: false
@@ -3572,7 +3979,7 @@ components:
     MediaContentType:
       type: string
       enum: [image/jpeg, image/png, image/gif, image/webp, image/avif, video/mp4, video/webm, video/quicktime]
-      description: Type MIME du fichier ; tout autre type, SVG compris, est refusé (`415`).
+      description: Type MIME du fichier, sous sa forme canonique (minuscules, sans paramètre).
       example: image/png
     MediaKind:
       type: string
@@ -3613,7 +4020,7 @@ components:
           type: string
           format: uri
           nullable: true
-          description: URL de téléchargement, `null` tant que le média n'est pas `ready` ; URL CloudFront permanente, ou URL S3 présignée temporaire sans CDN.
+          description: URL de téléchargement, `null` tant que le média n'est pas `ready` ; URL CloudFront permanente (CloudFront ne diffuse que les fichiers validés), ou URL S3 présignée temporaire sans CDN.
         urlExpiresAt:
           type: string
           format: date-time
@@ -3727,7 +4134,12 @@ components:
           maxLength: 200
           description: Nom du fichier d'origine (normalisé par le serveur, l'extension étant déduite du type).
         contentType:
-          $ref: '#/components/schemas/MediaContentType'
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: >-
+            Type MIME du fichier, sans tenir compte de la casse ni des paramètres (`Image/PNG; charset=binary` équivaut à `image/png`). Types acceptés : `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/avif`, `video/mp4`, `video/webm`, `video/quicktime` ; tout autre type, SVG compris, est refusé (`415`).
+          example: image/png
         size:
           type: integer
           minimum: 1
@@ -3735,7 +4147,8 @@ components:
         altText:
           type: string
           maxLength: 300
-          description: Texte alternatif (accessibilité).
+          nullable: true
+          description: Texte alternatif (accessibilité) ; `null` ou vide, aucun.
     MediaUpdateRequest:
       type: object
       additionalProperties: false
@@ -3745,12 +4158,12 @@ components:
           type: string
           maxLength: 300
           nullable: true
-          description: Nouveau texte alternatif (`null` pour le supprimer).
+          description: Nouveau texte alternatif (`null` ou vide pour le supprimer).
 
     # ------------------------------------------------------------------ Search
     SearchHit:
       type: object
-      description: Article trouvé (résumé) et pertinence.
+      description: Article trouvé (résumé copié dans l'index de recherche) et pertinence. Les valeurs absentes de l'index valent `null`.
       required: [id, slug, title, excerpt, coverImageUrl, tags, author, publishedAt, readingTimeMinutes, score, matchedTerms]
       properties:
         id:
@@ -3771,13 +4184,27 @@ components:
           items:
             type: string
         author:
-          $ref: '#/components/schemas/UserRef'
+          type: object
+          description: Auteur de l'article.
+          required: [id, name]
+          properties:
+            id:
+              type: string
+              format: uuid
+              nullable: true
+              description: Identifiant de l'auteur (`sub` Cognito).
+            name:
+              type: string
+              nullable: true
+              description: Nom affiché de l'auteur.
         publishedAt:
           type: string
           format: date-time
+          nullable: true
         readingTimeMinutes:
           type: integer
           minimum: 1
+          nullable: true
         score:
           type: number
           minimum: 0
@@ -3866,7 +4293,7 @@ components:
         tags:
           type: array
           maxItems: 10
-          description: Ne recevoir que les articles portant au moins l'un de ces tags (normalisés) ; absent ou vide, tous les articles.
+          description: Ne recevoir que les articles portant au moins l'un de ces tags (normalisés, chacun devant contenir au moins une lettre ou un chiffre) ; absent ou vide, tous les articles.
           items:
             type: string
             minLength: 1
@@ -3880,7 +4307,7 @@ components:
           format: email
         tags:
           type: array
-          description: Tags normalisés du filtre (vide = tous les articles).
+          description: Tags demandés, normalisés (vide = tous les articles). Une adresse déjà abonnée conserve toutefois ses préférences d'origine.
           items:
             type: string
         status:
@@ -3893,7 +4320,7 @@ components:
         email: lectrice@example.com
         tags: [serverless, dynamodb]
         status: pending_confirmation
-        message: Check your inbox to confirm your subscription.
+        message: Check your inbox (and spam folder) to confirm your subscription.
     Subscription:
       type: object
       required: [email, status, subscriptionArn]
