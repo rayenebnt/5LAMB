@@ -5,7 +5,7 @@
 
 import { batchWriteAll, keys, queryAll } from '../lib/db.mjs';
 import { ENTITY } from '../lib/schema.mjs';
-import { stripMarkdown, tokenize } from '../lib/text.mjs';
+import { normalizeTag, stripMarkdown, tokenize } from '../lib/text.mjs';
 import { postTags } from './tags.mjs';
 
 /** Points given to a term for each part of a post where it appears. */
@@ -115,9 +115,19 @@ export async function projectSearchTerms(before, after) {
   return { put: puts.length, deleted: deletes.length };
 }
 
-/** Distinct search terms of a query string (at most MAX_QUERY_TERMS, in query order). */
+/**
+ * Distinct search terms of a query string (at most MAX_QUERY_TERMS, in query order). A hyphenated
+ * word that is indexed as a whole tag (see tagTokens, e.g. "e-commerce") is searched as such too.
+ */
 export function queryTerms(query) {
-  return [...new Set(tokenize(query))].slice(0, MAX_QUERY_TERMS);
+  const terms = [];
+  for (const word of String(query ?? '').split(/\s+/).filter(Boolean)) {
+    terms.push(...tokenize(word));
+    if (!word.includes('-')) continue; // only words written with a hyphen ("L'IA" is not one)
+    const tag = normalizeTag(word);
+    if (tag.includes('-') && tagTokens(tag).includes(tag)) terms.push(tag);
+  }
+  return [...new Set(terms)].slice(0, MAX_QUERY_TERMS);
 }
 
 /**

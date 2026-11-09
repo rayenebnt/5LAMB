@@ -9,7 +9,7 @@
 // conditioned on the comment status that was read, so concurrent requests can neither lose nor
 // double-count a comment.
 
-import { GetCommand, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { dynamo } from '../lib/aws.mjs';
 import { assertCan, can, isOwner, PERMISSIONS } from '../lib/auth.mjs';
 import {
@@ -21,7 +21,7 @@ import {
   queryPage,
   tableName,
 } from '../lib/db.mjs';
-import { AppError, conflict, forbidden, notFound } from '../lib/errors.mjs';
+import { AppError, conflict, forbidden, notFound, serviceUnavailable } from '../lib/errors.mjs';
 import { nowIso, uuidv7 } from '../lib/ids.mjs';
 import { logger } from '../lib/logger.mjs';
 import { COMMENT_STATUS, ENTITY, POST_STATUS } from '../lib/schema.mjs';
@@ -76,14 +76,15 @@ export function toApiComment(item, { moderator = false } = {}) {
 }
 
 /**
- * Status of a new comment: a filled honeypot field means spam; comments of users holding a role
- * are approved immediately; the others (anonymous readers, users without role) await moderation.
+ * Status of a new comment: a filled honeypot field means spam; comments of moderators (editors and
+ * administrators) are approved immediately; every other comment (anonymous readers, guest authors,
+ * users without role) awaits moderation, since anyone can create a guest-author account.
  * @param {object|null} identity
  * @param {string|null|undefined} honeypot value of the hidden `website` form field
  */
 export function initialStatus(identity, honeypot) {
   if (typeof honeypot === 'string' && honeypot.trim() !== '') return COMMENT_STATUS.SPAM;
-  return identity && identity.roles.length > 0 ? COMMENT_STATUS.APPROVED : COMMENT_STATUS.PENDING;
+  return can(identity, PERMISSIONS.COMMENT_MODERATE) ? COMMENT_STATUS.APPROVED : COMMENT_STATUS.PENDING;
 }
 
 /**
@@ -113,11 +114,19 @@ export async function getCommentItem(postId, commentId, { consistent = false } =
   return Item ?? null;
 }
 
-function isTransactionConflict(err) {
+const RETRYABLE_REASONS = new Set([
+  TRANSACTION_CONFLICT,
+  'ThrottlingError',
+  'ProvisionedThroughputExceeded',
+  'RequestLimitExceeded',
+]);
+
+/** Cancelled only because of a concurrent transaction or throttling (nothing was written). */
+function isRetryableCancellation(err) {
   const reasons = cancellationReasons(err);
   return (
     isTransactionCanceled(err) &&
-    reasons.includes(TRANSACTION_CONFLICT) &&
+    reasons.some((reason) => RETRYABLE_REASONS.has(reason)) &&
     !reasons.includes(CONDITION_FAILED)
   );
 }
@@ -133,8 +142,11 @@ async function transactWrite(transactItems) {
       await dynamo().send(new TransactWriteCommand({ TransactItems: transactItems }));
       return;
     } catch (err) {
-      if (!isTransactionConflict(err)) throw err;
+      if (!isRetryableCancellation(err)) throw err;
       if (attempt >= MAX_TRANSACTION_ATTEMPTS) {
+        if (!cancellationReasons(err).includes(TRANSACTION_CONFLICT)) {
+          throw serviceUnavailable('The service is busy, please retry shortly');
+        }
         throw conflict('Too many concurrent updates of this post, please retry');
       }
       await sleep(attempt * 25 + Math.floor(Math.random() * 25));
@@ -155,14 +167,39 @@ function commentCountUpdate(postId, delta) {
   };
 }
 
+const PUBLISHED_POST_CONDITION = {
+  ConditionExpression: 'attribute_exists(PK) AND #status = :published',
+  ExpressionAttributeNames: { '#status': 'status' },
+};
+
+/**
+ * Transaction item guarding the creation of a comment: the post must still exist and be
+ * published when the comment is written (it may be deleted or unpublished after it was read).
+ * Approved comments also increment the counter; the others only check the post.
+ */
+function publishedPostGuard(postId, approved) {
+  const base = { TableName: tableName(), Key: keys.post(postId), ...PUBLISHED_POST_CONDITION };
+  if (!approved) {
+    return { ConditionCheck: { ...base, ExpressionAttributeValues: { ':published': POST_STATUS.PUBLISHED } } };
+  }
+  return {
+    Update: {
+      ...base,
+      UpdateExpression: 'ADD commentCount :one',
+      ExpressionAttributeValues: { ':one': 1, ':published': POST_STATUS.PUBLISHED },
+    },
+  };
+}
+
 /**
  * Applies a conditional comment write (Put / Update / Delete transaction item) together with the
  * post counter update when `delta` is not 0, in a single transaction.
  * Throws 409 when the comment condition fails (concurrent change). Returns false, without having
  * written anything, when the post no longer exists; true on success.
  */
-async function writeComment(commentWrite, postId, delta) {
-  const transactItems = delta === 0 ? [commentWrite] : [commentWrite, commentCountUpdate(postId, delta)];
+async function writeComment(commentWrite, postId, delta, postGuard) {
+  const guard = postGuard ?? (delta === 0 ? null : commentCountUpdate(postId, delta));
+  const transactItems = guard ? [commentWrite, guard] : [commentWrite];
   try {
     await transactWrite(transactItems);
     return true;
@@ -261,12 +298,9 @@ export async function createComment(identity, postId, input) {
   };
   const put = { TableName: tableName(), Item: item, ConditionExpression: 'attribute_not_exists(PK)' };
 
-  if (status === COMMENT_STATUS.APPROVED) {
-    const written = await writeComment({ Put: put }, postId, commentCountDelta(null, status));
-    if (!written) throw notFound('Post not found');
-  } else {
-    await dynamo().send(new PutCommand(put));
-  }
+  const guard = publishedPostGuard(postId, status === COMMENT_STATUS.APPROVED);
+  const written = await writeComment({ Put: put }, postId, 0, guard);
+  if (!written) throw notFound('Post not found');
   if (status === COMMENT_STATUS.SPAM) {
     logger.info('Comment classified as spam (honeypot field filled)', { postId, commentId });
   }

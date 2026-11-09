@@ -422,9 +422,23 @@ describe('projector: publication lifecycle', () => {
     assert.equal(counter('aws').postCount, 1);
   });
 
-  test('changes that do not affect the projections (comment counter) are skipped', async () => {
+  test('summary-only changes (comment counter) refresh the tag memberships, not the search index', async () => {
     const published = postItem();
-    await project(modify(published, postItem({ commentCount: 5, updatedAt: '2026-10-28T08:00:00.000Z', version: 4 })));
+    await project(modify(draft(), published));
+    ddb.resetHistory();
+    const commented = postItem({ commentCount: 5, updatedAt: '2026-10-28T08:00:00.000Z', version: 4 });
+    await project(modify(published, commented));
+
+    assertProjectionsMatch([commented]);
+    assert.equal(membership('aws').commentCount, 5);
+    const names = ddb.calls().map((call) => call.args[0].constructor.name);
+    assert.ok(names.every((name) => name === 'PutCommand'), names.join(', '));
+    assert.equal(names.length, postTags(commented).length, 'one conditional Put per tag');
+  });
+
+  test('changes of attributes that are not projected at all are skipped', async () => {
+    const published = postItem();
+    await project(modify(published, { ...published, customExcerpt: !published.customExcerpt }));
     assert.equal(ddb.calls().length, 0);
   });
 
@@ -715,7 +729,8 @@ function randomHistory(random, steps) {
     if (action === 'comment') after.commentCount += 1;
     records.push(modify(before, after));
     current[index] = after;
-    if (hasRelevantChange(before, after)) projected[index] = after;
+    const bothPublished = before.status === 'published' && after.status === 'published';
+    if (hasRelevantChange(before, after) || bothPublished) projected[index] = after;
   }
   return { records, projected };
 }

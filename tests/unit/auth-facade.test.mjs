@@ -243,13 +243,14 @@ describe('POST /auth/register', () => {
     assert.equal(ddb.calls().length, 0);
   });
 
-  test('a role assignment failure is reported and no profile is written', async () => {
+  test('a role assignment failure does not abort the registration (the role is assigned at login)', async () => {
     mockSuccessfulSignUp();
     cognito.on(AdminAddUserToGroupCommand).rejects(cognitoError('InternalErrorException'));
     const res = await post('/auth/register', body);
 
-    assertError(res, 500, 'INTERNAL_ERROR');
-    assert.equal(ddb.calls().length, 0);
+    assert.equal(res.statusCode, 201, res.body);
+    assert.equal(parse(res).role, 'guest-author');
+    assert.equal(ddb.commandCalls(PutCommand).length, 1, 'the profile is still created');
   });
 });
 
@@ -308,11 +309,16 @@ describe('POST /auth/resend-code', () => {
     const unknown = await post('/auth/resend-code', { email: 'nobody@example.com' });
     assert.equal(unknown.statusCode, 202, unknown.body);
     assert.deepEqual(parse(unknown), parse(sent));
+
+    // An already confirmed account gets the same answer (no account enumeration).
+    cognito.on(ResendConfirmationCodeCommand).rejects(cognitoError('InvalidParameterException'));
+    const confirmed = await post('/auth/resend-code', { email: EMAIL });
+    assert.equal(confirmed.statusCode, 202, confirmed.body);
+    assert.deepEqual(parse(confirmed), parse(sent));
   });
 
   test('maps the other Cognito errors', async () => {
     const cases = [
-      ['InvalidParameterException', 400, 'INVALID_PARAMETER'], // e.g. account already confirmed
       ['LimitExceededException', 429, 'TOO_MANY_REQUESTS'],
       ['TooManyRequestsException', 429, 'TOO_MANY_REQUESTS'],
     ];
@@ -401,11 +407,43 @@ describe('POST /auth/login', () => {
       { email: EMAIL },
       { password: PASSWORD },
       { email: 'jane', password: PASSWORD },
-      { email: EMAIL, password: 'alllowercase1' },
+      { email: EMAIL, password: '' },
       { email: EMAIL, password: PASSWORD, remember: true },
     ];
     for (const input of invalid) assertError(await post('/auth/login', input), 400, 'VALIDATION_ERROR');
     assert.equal(cognito.calls().length, 0);
+  });
+
+  test('a password that does not follow the policy is checked by Cognito (401, policy never disclosed)', async () => {
+    cognito.on(InitiateAuthCommand).rejects(cognitoError('NotAuthorizedException'));
+    assertError(await post('/auth/login', { email: EMAIL, password: 'alllowercase1' }), 401, 'INVALID_CREDENTIALS');
+    assert.equal(cognito.commandCalls(InitiateAuthCommand).length, 1);
+  });
+
+  test('an account without any role gets the default role at login, with refreshed tokens', async () => {
+    const token = (claims) =>
+      ['header', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'signature'].join('.');
+    const withoutRole = token({ sub: SUB, email: EMAIL, token_use: 'id' });
+    const withRole = token({ sub: SUB, email: EMAIL, token_use: 'id', 'cognito:groups': ['guest-author'] });
+    cognito
+      .on(InitiateAuthCommand, { AuthFlow: 'USER_PASSWORD_AUTH' })
+      .resolves({ AuthenticationResult: { ...AUTH_RESULT, IdToken: withoutRole } });
+    cognito
+      .on(InitiateAuthCommand, { AuthFlow: 'REFRESH_TOKEN_AUTH' })
+      .resolves({ AuthenticationResult: { ...AUTH_RESULT, IdToken: withRole, RefreshToken: undefined } });
+    cognito.on(AdminAddUserToGroupCommand).resolves({});
+
+    const res = await post('/auth/login', { email: EMAIL, password: PASSWORD });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(parse(res).idToken, withRole);
+    assert.equal(parse(res).refreshToken, REFRESH_TOKEN);
+    assert.deepEqual(inputOf(AdminAddUserToGroupCommand), { UserPoolId: POOL_ID, Username: SUB, GroupName: 'guest-author' });
+
+    // If the repair fails, the original tokens are still returned.
+    cognito.on(AdminAddUserToGroupCommand).rejects(cognitoError('InternalErrorException'));
+    const degraded = await post('/auth/login', { email: EMAIL, password: PASSWORD });
+    assert.equal(degraded.statusCode, 200, degraded.body);
+    assert.equal(parse(degraded).idToken, withoutRole);
   });
 
   test('public routes ignore the Authorization header', async () => {

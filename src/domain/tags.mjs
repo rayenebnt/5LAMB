@@ -177,6 +177,19 @@ export async function projectTags(before, after) {
   return diff;
 }
 
+/** Upper bound of tag counters read by GET /tags (far above any realistic blog). */
+const MAX_LISTED_TAGS_READ = 20000;
+
+/**
+ * Refreshes the summary copied in the memberships of a published post whose projections do not
+ * otherwise change (comment counter, version or update date only): tag listings stay accurate.
+ */
+export async function refreshMemberships(post) {
+  const tags = postTags(post);
+  for (const tag of tags) await refreshMembership(post, tag);
+  return tags;
+}
+
 /** Orders tags by decreasing number of posts, then alphabetically. */
 export function compareTagCounts(a, b) {
   return b.postCount - a.postCount || compareStrings(a.tag, b.tag);
@@ -186,12 +199,17 @@ export function compareTagCounts(a, b) {
  * Tags having at least one published post: `[{ tag, postCount }]`, most used first.
  */
 export async function listTags() {
-  const counters = await queryAll({
-    KeyConditionExpression: 'PK = :pk',
-    FilterExpression: '#postCount > :zero',
-    ExpressionAttributeNames: { '#postCount': 'postCount' },
-    ExpressionAttributeValues: { ':pk': COUNTERS_PARTITION, ':zero': 0 },
-  });
+  // Counters are read in key (alphabetical) order: read them all before sorting by popularity,
+  // otherwise a cap would drop popular tags late in the alphabet.
+  const counters = await queryAll(
+    {
+      KeyConditionExpression: 'PK = :pk',
+      FilterExpression: '#postCount > :zero',
+      ExpressionAttributeNames: { '#postCount': 'postCount' },
+      ExpressionAttributeValues: { ':pk': COUNTERS_PARTITION, ':zero': 0 },
+    },
+    { maxItems: MAX_LISTED_TAGS_READ },
+  );
   return counters
     .map((counter) => ({ tag: counter.tag, postCount: Number(counter.postCount) }))
     .filter(({ tag, postCount }) => typeof tag === 'string' && tag !== '' && postCount > 0)

@@ -26,7 +26,7 @@ function postItem(overrides = {}) {
     GSI1PK: 'POSTS#published',
     GSI1SK: `${PUBLISHED}#${POST_ID}`,
     GSI2PK: `USER#${users.author.userId}`,
-    GSI2SK: `POST#${CREATED}#${POST_ID}`,
+    GSI2SK: `POST#published#${CREATED}#${POST_ID}`,
     entityType: 'POST',
     postId: POST_ID,
     slug: 'mon-article',
@@ -242,7 +242,7 @@ describe('GET /posts', () => {
     assert.deepEqual(query.ExpressionAttributeValues, { ':pk': 'TAG#aws', ':authorId': users.author.userId });
   });
 
-  test('author: GSI2 of the author restricted to posts, filtered on the status', async () => {
+  test('author: GSI2 of the author, key condition on the status prefix (no filter)', async () => {
     ddb.on(QueryCommand).resolves({ Items: [summaryItem(1)] });
     const res = await list({ author: users.author.userId });
     assert.equal(res.statusCode, 200, res.body);
@@ -250,12 +250,10 @@ describe('GET /posts', () => {
     const [query] = queries();
     assert.equal(query.IndexName, 'GSI2');
     assert.equal(query.KeyConditionExpression, 'GSI2PK = :pk AND begins_with(GSI2SK, :prefix)');
-    assert.equal(query.FilterExpression, '#status = :status');
-    assert.deepEqual(query.ExpressionAttributeNames, { '#status': 'status' });
+    assert.equal(query.FilterExpression, undefined);
     assert.deepEqual(query.ExpressionAttributeValues, {
       ':pk': `USER#${users.author.userId}`,
-      ':prefix': 'POST#',
-      ':status': 'published',
+      ':prefix': 'POST#published#',
     });
     assert.equal(query.ScanIndexForward, false);
   });
@@ -293,7 +291,7 @@ describe('GET /posts', () => {
     for (const input of queries()) {
       assert.equal(input.IndexName, 'GSI2');
       assert.equal(input.ExpressionAttributeValues[':pk'], `USER#${users.author.userId}`);
-      assert.equal(input.ExpressionAttributeValues[':status'], 'draft');
+      assert.equal(input.ExpressionAttributeValues[':prefix'], 'POST#draft#');
     }
     assertError(await list({ status: 'draft', author: users.author2.userId }, { token }), 403, 'FORBIDDEN');
   });
@@ -311,7 +309,7 @@ describe('GET /posts', () => {
     const byAuthor = await list({ status: 'archived', author: users.author.userId }, { token });
     assert.equal(byAuthor.statusCode, 200, byAuthor.body);
     assert.equal(queries()[1].IndexName, 'GSI2');
-    assert.equal(queries()[1].ExpressionAttributeValues[':status'], 'archived');
+    assert.equal(queries()[1].ExpressionAttributeValues[':prefix'], 'POST#archived#');
   });
 
   test('the tag filter with an unpublished status is a 400', async () => {

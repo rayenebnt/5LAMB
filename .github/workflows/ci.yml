@@ -25,10 +25,13 @@ jobs:
       - run: npm ci
       - name: Unit tests
         run: npm test
+      - name: Wait for DynamoDB Local
+        run: for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:8000 && exit 0; sleep 1; done; exit 1
       - name: Integration tests (DynamoDB Local)
         run: npm run test:integration
         env:
           DYNAMODB_ENDPOINT: http://localhost:8000
+          REQUIRE_DYNAMODB_LOCAL: 'true'
       - name: Bundle Lambda functions
         run: npm run build
 

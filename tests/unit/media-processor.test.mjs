@@ -13,6 +13,7 @@ import {
   HeadObjectCommand,
   NoSuchKey,
   NotFound,
+  PutObjectTaggingCommand,
   S3Client,
   S3ServiceException,
 } from '@aws-sdk/client-s3';
@@ -394,7 +395,7 @@ describe('media processor', () => {
     assert.equal(s3.commandCalls(GetObjectCommand)[0].args[0].input.Key, decodedKey);
   });
 
-  test('wrong content type: the object is deleted, then the media is rejected for 7 days', async () => {
+  test('wrong content type: the media is rejected for 7 days, then the object is deleted', async () => {
     givenItem(mediaItem());
     givenObject({ contentType: 'image/jpeg', bytes: SAMPLES['image/jpeg'] });
     const order = [];
@@ -414,7 +415,7 @@ describe('media processor', () => {
       mediaId: MEDIA_ID,
       reason: "Content type 'image/jpeg' does not match the declared type 'image/png'",
     });
-    assert.deepEqual(order, ['delete-object', 'update-item']);
+    assert.deepEqual(order, ['update-item', 'delete-object']);
     assert.deepEqual(deletedObjects(), [{ Bucket: BUCKET, Key: KEY }]);
     const [update] = updates();
     assert.equal(
@@ -669,5 +670,43 @@ describe('media processor', () => {
     }
     assert.equal(ddb.calls().length, 0);
     assert.equal(s3.calls().length, 0);
+  });
+});
+
+describe('validated objects and retries', () => {
+  test('a valid upload is tagged (CloudFront serves tagged objects only) before the media becomes ready', async () => {
+    givenItem(mediaItem());
+    givenObject({ contentType: 'image/png', bytes: SAMPLES['image/png'] });
+    const order = [];
+    s3.on(PutObjectTaggingCommand).callsFake((input) => {
+      order.push(['tag', input]);
+      return {};
+    });
+    ddb.on(UpdateCommand).callsFake(() => {
+      order.push(['update-item']);
+      return {};
+    });
+
+    const result = await handler(s3Event());
+    assert.equal(result.outcome, 'ready');
+    assert.deepEqual(order.map(([step]) => step), ['tag', 'update-item']);
+    assert.deepEqual(order[0][1], {
+      Bucket: BUCKET,
+      Key: KEY,
+      Tagging: { TagSet: [{ Key: 'blogify-status', Value: 'ready' }] },
+    });
+  });
+
+  test('a failed rejection update is retried: the second attempt ends rejected with the object deleted', async () => {
+    givenItem(mediaItem());
+    givenObject({ contentType: 'image/jpeg', bytes: SAMPLES['image/jpeg'] });
+    ddb.on(UpdateCommand).rejectsOnce(Object.assign(new Error('throttled'), { name: 'ThrottlingException' })).resolves({});
+
+    await assert.rejects(handler(s3Event()), /throttled/);
+    assert.equal(s3.commandCalls(DeleteObjectCommand).length, 0, 'the object is kept until the media is marked');
+
+    const result = await handler(s3Event());
+    assert.equal(result.outcome, 'rejected');
+    assert.deepEqual(deletedObjects(), [{ Bucket: BUCKET, Key: KEY }]);
   });
 });

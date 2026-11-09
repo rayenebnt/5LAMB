@@ -44,7 +44,9 @@ const results = await Promise.all(
       },
       logLevel: 'warning',
     });
-    writeFileSync(join(outdir, 'package.json'), `${JSON.stringify({ name: `blogify-${name}`, type: 'module' }, null, 2)}\n`);
+    // A complete package.json also lets `sam build` process the bundle (version is required).
+    const manifest = { name: `blogify-${name}`, version: '1.0.0', private: true, type: 'module' };
+    writeFileSync(join(outdir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     const bytes = Object.values(result.metafile.outputs).reduce((sum, output) => sum + output.bytes, 0);
     return { name, bytes };
   }),

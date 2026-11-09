@@ -32,7 +32,7 @@ function storedPost(overrides = {}) {
     GSI1PK: 'POSTS#draft',
     GSI1SK: `${CREATED}#${POST_ID}`,
     GSI2PK: `USER#${users.author.userId}`,
-    GSI2SK: `POST#${CREATED}#${POST_ID}`,
+    GSI2SK: `POST#draft#${CREATED}#${POST_ID}`,
     entityType: 'POST',
     postId: POST_ID,
     slug: 'mon-article',
@@ -322,7 +322,7 @@ describe('buildPostItem', () => {
       GSI1PK: 'POSTS#draft',
       GSI1SK: `${NOW}#${POST_ID}`,
       GSI2PK: `USER#${users.author.userId}`,
-      GSI2SK: `POST#${NOW}#${POST_ID}`,
+      GSI2SK: `POST#draft#${NOW}#${POST_ID}`,
       entityType: 'POST',
       postId: POST_ID,
       slug: 'titre',
@@ -372,6 +372,7 @@ describe('computePostChanges', () => {
       updatedAt: NOW,
       version: 4,
       GSI1SK: `${NOW}#${POST_ID}`,
+      GSI2SK: `POST#draft#${NOW}#${POST_ID}`,
     });
   });
 
@@ -458,6 +459,7 @@ describe('workflow', () => {
       submittedAt: NOW,
       GSI1PK: 'POSTS#in_review',
       GSI1SK: `${NOW}#${POST_ID}`,
+      GSI2SK: `POST#in_review#${NOW}#${POST_ID}`,
     });
   });
 
@@ -471,6 +473,7 @@ describe('workflow', () => {
       reviewNote: null,
       GSI1PK: 'POSTS#published',
       GSI1SK: `${NOW}#${POST_ID}`,
+      GSI2SK: `POST#published#${NOW}#${POST_ID}`,
     });
   });
 
@@ -478,6 +481,7 @@ describe('workflow', () => {
     const changes = transitionChanges(storedPost({ status: 'archived', publishedAt: CREATED }), 'publish', { now: NOW });
     assert.equal(changes.publishedAt, CREATED);
     assert.equal(changes.GSI1SK, `${CREATED}#${POST_ID}`);
+    assert.equal(changes.GSI2SK, `POST#published#${CREATED}#${POST_ID}`);
   });
 
   test('unpublish, reject and archive sort by update date and keep publishedAt', () => {
@@ -489,6 +493,7 @@ describe('workflow', () => {
       version: 4,
       GSI1PK: 'POSTS#draft',
       GSI1SK: `${NOW}#${POST_ID}`,
+      GSI2SK: `POST#draft#${NOW}#${POST_ID}`,
     });
     const rejected = transitionChanges(storedPost({ status: 'in_review' }), 'reject', { note: 'Trop court', now: NOW });
     assert.equal(rejected.status, 'draft');
@@ -506,9 +511,7 @@ describe('planPostListing (GET /posts matrix)', () => {
   const ownDrafts = (userId, status = 'draft') => ({
     indexName: 'GSI2',
     keyCondition: 'GSI2PK = :pk AND begins_with(GSI2SK, :prefix)',
-    names: { '#status': 'status' },
-    values: { ':pk': `USER#${userId}`, ':prefix': 'POST#', ':status': status },
-    filter: '#status = :status',
+    values: { ':pk': `USER#${userId}`, ':prefix': `POST#${status}#` },
   });
   const assertStatus = (statusCode, fn) => assert.throws(fn, (err) => err.statusCode === statusCode);
 

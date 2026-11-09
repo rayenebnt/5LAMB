@@ -30,7 +30,7 @@ function postItem(overrides = {}) {
     GSI1PK: `POSTS#${status}`,
     GSI1SK: `${status === 'published' ? publishedAt : CREATED}#${POST_ID}`,
     GSI2PK: `USER#${users.author.userId}`,
-    GSI2SK: `POST#${CREATED}#${POST_ID}`,
+    GSI2SK: `POST#draft#${CREATED}#${POST_ID}`,
     entityType: 'POST',
     postId: POST_ID,
     slug: 'mon-article',
@@ -173,7 +173,7 @@ describe('POST /posts', () => {
         GSI1PK: 'POSTS#draft',
         GSI1SK: `${post.createdAt}#${post.id}`,
         GSI2PK: `USER#${users.author.userId}`,
-        GSI2SK: `POST#${post.createdAt}#${post.id}`,
+        GSI2SK: `POST#draft#${post.createdAt}#${post.id}`,
         entityType: 'POST',
         customExcerpt: false,
       },
@@ -352,6 +352,7 @@ describe('PATCH /posts/{postId}', () => {
     assert.equal(update.ReturnValues, 'ALL_NEW');
     assert.deepEqual(setAttributes(update), [
       'GSI1SK',
+      'GSI2SK',
       'content',
       'excerpt',
       'readingTimeMinutes',
@@ -402,6 +403,7 @@ describe('PATCH /posts/{postId}', () => {
     assert.equal(res.statusCode, 200, res.body);
     const update = inputs(UpdateCommand)[0];
     assert.ok(!setAttributes(update).includes('GSI1SK'));
+    assert.ok(!setAttributes(update).includes('GSI2SK'));
     assert.ok(!setAttributes(update).includes('GSI1PK'));
     assert.equal(parse(res).publishedAt, FIRST_PUBLISHED);
   });
@@ -708,7 +710,7 @@ describe('POST /posts/{postId}/{action}', () => {
     assert.equal(update.ConditionExpression, 'attribute_exists(PK) AND #version = :expectedVersion');
     assert.equal(update.ExpressionAttributeValues[':expectedVersion'], 4);
     const values = setValues(update);
-    assert.deepEqual(Object.keys(values).sort(), ['GSI1PK', 'GSI1SK', 'status', 'submittedAt', 'updatedAt', 'version']);
+    assert.deepEqual(Object.keys(values).sort(), ['GSI1PK', 'GSI1SK', 'GSI2SK', 'status', 'submittedAt', 'updatedAt', 'version']);
     assert.equal(values.GSI1PK, 'POSTS#in_review');
     assert.equal(values.GSI1SK, `${values.updatedAt}#${POST_ID}`);
     assert.equal(values.submittedAt, values.updatedAt);
@@ -760,7 +762,7 @@ describe('POST /posts/{postId}/{action}', () => {
     assert.equal(post.status, 'draft');
     assert.equal(post.publishedAt, FIRST_PUBLISHED);
     const values = setValues(inputs(UpdateCommand)[0]);
-    assert.deepEqual(Object.keys(values).sort(), ['GSI1PK', 'GSI1SK', 'status', 'updatedAt', 'version']);
+    assert.deepEqual(Object.keys(values).sort(), ['GSI1PK', 'GSI1SK', 'GSI2SK', 'status', 'updatedAt', 'version']);
     assert.equal(values.GSI1PK, 'POSTS#draft');
     assert.equal(values.GSI1SK, `${values.updatedAt}#${POST_ID}`);
   });

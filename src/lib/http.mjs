@@ -117,6 +117,17 @@ export function parseJsonBody(event) {
   return parsed;
 }
 
+/**
+ * Path prefix of the deployment: "/<stage>" on the execute-api URL, the base path mapping behind
+ * a custom domain, or "" (requestContext.path is the full path, event.path the route path).
+ */
+export function basePathOf(event) {
+  const fullPath = event?.requestContext?.path;
+  const routePath = event?.path;
+  if (typeof fullPath !== 'string' || typeof routePath !== 'string' || !routePath) return '';
+  return fullPath.endsWith(routePath) ? fullPath.slice(0, fullPath.length - routePath.length) : '';
+}
+
 function decodeParams(params) {
   const decoded = {};
   for (const [key, value] of Object.entries(params ?? {})) {
@@ -137,15 +148,25 @@ const THROTTLING_ERRORS = new Set([
   'LimitExceededException',
 ]);
 
+/** DynamoDB transaction cancelled only because of throttling (retryable, nothing was written). */
+const THROTTLING_CANCELLATION_REASONS = new Set(['ThrottlingError', 'ProvisionedThroughputExceeded', 'RequestLimitExceeded']);
+
+function isThrottling(err) {
+  if (THROTTLING_ERRORS.has(err?.name)) return true;
+  if (err?.name !== 'TransactionCanceledException') return false;
+  const reasons = (err.CancellationReasons ?? []).map((reason) => reason?.Code);
+  return reasons.some((code) => THROTTLING_CANCELLATION_REASONS.has(code)) && !reasons.includes('ConditionalCheckFailed');
+}
+
 /** Converts any error into an API response; unexpected errors are logged and hidden. */
 export function errorResponse(err, requestId) {
   if (err instanceof AppError) {
     const error = { code: err.code, message: err.message };
     if (err.details !== undefined) error.details = err.details;
     if (err.statusCode >= 500) logger.error('Request failed', { requestId, error: err });
-    return json(err.statusCode, { error, requestId });
+    return json(err.statusCode, { error, requestId }, err.statusCode === 503 ? { 'Retry-After': '1' } : {});
   }
-  if (THROTTLING_ERRORS.has(err?.name)) {
+  if (isThrottling(err)) {
     logger.warn('Downstream throttling', { requestId, error: err });
     const unavailable = serviceUnavailable('The service is busy, please retry shortly');
     return json(503, { error: { code: unavailable.code, message: unavailable.message }, requestId }, { 'Retry-After': '1' });
@@ -197,6 +218,12 @@ export function createApiHandler(routes) {
         },
       };
       response = await route.handler(req);
+      // Location headers are built from route paths ("/posts/<id>"): add the stage prefix so
+      // that clients resolving them against the request URL reach the resource.
+      const location = response?.headers?.Location;
+      if (typeof location === 'string' && location.startsWith('/')) {
+        response.headers.Location = `${basePathOf(event)}${location}`;
+      }
     } catch (err) {
       response = errorResponse(err, requestId);
     }

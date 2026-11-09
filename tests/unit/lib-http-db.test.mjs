@@ -124,3 +124,41 @@ test('batchWriteAll chunks, de-duplicates and retries unprocessed items', async 
   const calls = ddb.commandCalls(BatchWriteCommand).map((c) => c.args[0].input.RequestItems['blogify-test'].length);
   assert.deepEqual(calls, [25, 2, 2]);
 });
+
+test('Location headers get the deployment prefix (stage or base path mapping)', async () => {
+  const { basePathOf } = await import('../../src/lib/http.mjs');
+  const handler = createApiHandler({
+    'POST /things': { auth: 'none', handler: async () => created({ id: '1' }, '/things/1') },
+  });
+  const event = apiEvent({ method: 'POST', resource: '/things', body: {} });
+  assert.equal(basePathOf(event), '');
+  assert.equal((await handler(event)).headers.Location, '/things/1');
+
+  event.requestContext.path = '/dev/things';
+  assert.equal(basePathOf(event), '/dev');
+  assert.equal((await handler(event)).headers.Location, '/dev/things/1');
+
+  event.requestContext.path = '/v1/things'; // custom domain with a base path mapping
+  assert.equal((await handler(event)).headers.Location, '/v1/things/1');
+});
+
+test('503 responses carry Retry-After; throttled transactions are 503, not 500', async () => {
+  const { serviceUnavailable } = await import('../../src/lib/errors.mjs');
+  const handler = createApiHandler({
+    'GET /busy': { handler: async () => { throw serviceUnavailable(); } },
+    'GET /tx': {
+      handler: async () => {
+        throw Object.assign(new Error('Transaction cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ThrottlingError' }, { Code: 'None' }],
+        });
+      },
+    },
+  });
+  const busy = await handler(apiEvent({ resource: '/busy' }));
+  assert.equal(busy.statusCode, 503);
+  assert.equal(busy.headers['Retry-After'], '1');
+  const tx = await handler(apiEvent({ resource: '/tx' }));
+  assert.equal(tx.statusCode, 503);
+  assert.equal(tx.headers['Retry-After'], '1');
+});

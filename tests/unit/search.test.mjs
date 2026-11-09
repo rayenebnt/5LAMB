@@ -308,6 +308,9 @@ describe('search helpers', () => {
     assert.deepEqual(queryTerms("L'architecture Serverless, serverless et AWS"), ['architecture', 'serverless', 'aws']);
     assert.deepEqual(queryTerms('a b c the'), []);
     assert.equal(queryTerms('k1 k2 k3 k4 k5 k6 k7 k8 k9').length, MAX_QUERY_TERMS);
+    // Tags indexed as a whole (single meaningful word) are searchable as written.
+    assert.deepEqual(queryTerms('E-commerce mobile'), ['commerce', 'e-commerce', 'mobile']);
+    assert.deepEqual(queryTerms('serverless-aws'), ['serverless', 'aws']);
   });
 
   test('aggregateMatches sums the scores and counts the matched terms of each post', () => {

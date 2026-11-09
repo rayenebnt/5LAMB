@@ -28,11 +28,11 @@ import {
   SignUpCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { ALL_ROLES, DEFAULT_ROLE, primaryRole, ROLE_PERMISSIONS } from '../lib/auth.mjs';
+import { ALL_ROLES, DEFAULT_ROLE, parseRoles, primaryRole, ROLE_PERMISSIONS, ROLES } from '../lib/auth.mjs';
 import { cognito, dynamo } from '../lib/aws.mjs';
 import { config } from '../lib/config.mjs';
 import { isConditionalCheckFailed, keys, tableName } from '../lib/db.mjs';
-import { AppError, badRequest, conflict, notFound, tooManyRequests } from '../lib/errors.mjs';
+import { AppError, badRequest, conflict, forbidden, notFound, tooManyRequests } from '../lib/errors.mjs';
 import { nowIso } from '../lib/ids.mjs';
 import { logger } from '../lib/logger.mjs';
 import { ENTITY } from '../lib/schema.mjs';
@@ -408,14 +408,11 @@ export async function registerUser({ email, password, name }) {
   );
   const userId = signUp.UserSub;
   try {
-    await sendCognito(
-      new AdminAddUserToGroupCommand({ UserPoolId: config.userPoolId, Username: userId, GroupName: DEFAULT_ROLE }),
-      'admin',
-    );
+    await assignDefaultRole(userId);
   } catch (err) {
-    // The account exists without any role (no permission): an administrator can assign it.
-    logger.error('Role assignment failed after sign-up', { userId, error: err });
-    throw err;
+    // The account exists: aborting would make every retry fail with USER_EXISTS. The default
+    // role is assigned again at the first login (see login), so registration carries on.
+    logger.error('Default role assignment failed after sign-up (retried at login)', { userId, error: err });
   }
   let confirmed = Boolean(signUp.UserConfirmed);
   if (!confirmed && config.autoConfirmUsers) confirmed = await autoConfirm(userId);
@@ -439,13 +436,36 @@ export async function confirmRegistration({ email, code }) {
   );
 }
 
-/** POST /auth/resend-code: sends a new confirmation code (unknown accounts answer the same). */
+/**
+ * POST /auth/resend-code: sends a new confirmation code. Unknown and already confirmed accounts
+ * get the same answer, so the endpoint does not reveal which addresses are registered.
+ */
 export async function resendConfirmationCode({ email }) {
   try {
     await cognito().send(new ResendConfirmationCodeCommand({ ClientId: config.userPoolClientId, Username: email }));
   } catch (err) {
-    if (err?.name !== 'UserNotFoundException') throw mapCognitoError(err, 'account');
-    logger.info('Confirmation code requested for an unknown account');
+    if (err?.name === 'UserNotFoundException' || err?.name === 'InvalidParameterException') {
+      logger.info('Confirmation code requested for an unknown or already confirmed account');
+      return;
+    }
+    throw mapCognitoError(err, 'account');
+  }
+}
+
+/** Adds a user to the default role group (idempotent). */
+async function assignDefaultRole(userId) {
+  await sendCognito(
+    new AdminAddUserToGroupCommand({ UserPoolId: config.userPoolId, Username: userId, GroupName: DEFAULT_ROLE }),
+    'admin',
+  );
+}
+
+/** Claims of a token freshly issued by Cognito (read only, not a verification). */
+export function decodeTokenClaims(token) {
+  try {
+    return JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8'));
+  } catch {
+    return {};
   }
 }
 
@@ -459,7 +479,37 @@ export async function login({ email, password }) {
     }),
     'login',
   );
+  const result = response?.AuthenticationResult;
+  if (result?.IdToken && result.RefreshToken) {
+    const claims = decodeTokenClaims(result.IdToken);
+    if (claims.sub && parseRoles(claims['cognito:groups']).length === 0) {
+      return healMissingRole(claims.sub, result);
+    }
+  }
   return toAuthResult(response);
+}
+
+/**
+ * Self-healing for accounts without any role (default role assignment failed at sign-up, or an
+ * account created outside the API): assigns the default role, then refreshes the tokens so that
+ * the returned ID token already carries it. On failure the original tokens are returned.
+ */
+async function healMissingRole(userId, result) {
+  try {
+    await assignDefaultRole(userId);
+    const refreshed = await cognito().send(
+      new InitiateAuthCommand({
+        AuthFlow: 'REFRESH_TOKEN_AUTH',
+        ClientId: config.userPoolClientId,
+        AuthParameters: { REFRESH_TOKEN: result.RefreshToken },
+      }),
+    );
+    logger.info('Default role assigned at login', { userId });
+    return toApiTokens({ ...refreshed.AuthenticationResult, RefreshToken: result.RefreshToken });
+  } catch (err) {
+    logger.error('Default role assignment at login failed', { userId, error: err });
+    return toApiTokens(result);
+  }
 }
 
 /** POST /auth/refresh: new ID/access tokens from a refresh token. */
@@ -614,8 +664,12 @@ export async function listUsers({ limit, cursor, role }) {
       new ListUsersInGroupCommand({ UserPoolId: config.userPoolId, GroupName: role, Limit: limit, NextToken: token }),
       'admin',
     );
+    const members = page.Users ?? [];
+    const memberGroups = await mapWithConcurrency(members, GROUP_LOOKUP_CONCURRENCY, (user) =>
+      groupsOfListedUser(user.Username),
+    );
     return {
-      items: (page.Users ?? []).map((user) => toApiUser(user, [role])),
+      items: members.flatMap((user, index) => (memberGroups[index] ? [toApiUser(user, memberGroups[index])] : [])),
       nextCursor: encodeUsersCursor(page.NextToken, role),
     };
   }
@@ -641,23 +695,70 @@ export async function getUser(userId, knownGroups) {
 }
 
 /**
- * POST /users: creates an account (Cognito e-mails a temporary password; the first login
- * answers a NEW_PASSWORD_REQUIRED challenge) with the given role.
+ * ID tokens stay valid up to 60 minutes after a demotion or a deactivation: administration
+ * operations therefore re-check, in Cognito, that the caller is still an enabled administrator.
  */
-export async function inviteUser({ email, name, role }, actor) {
-  const { User: user } = await sendCognito(
+export async function assertActiveAdministrator(identity) {
+  let user;
+  try {
+    user = await getUser(identity.userId);
+  } catch (err) {
+    if (err instanceof AppError && err.statusCode === 404) throw forbidden('Your account no longer exists');
+    throw err;
+  }
+  if (!user.enabled || user.role !== ROLES.ADMIN) {
+    throw forbidden('Your administrator rights have been revoked');
+  }
+}
+
+/** Re-sends the invitation of an account that never completed its first login (or returns null). */
+async function resendInvitation({ email, role }) {
+  const existing = await sendCognito(new AdminGetUserCommand({ UserPoolId: config.userPoolId, Username: email }), 'admin');
+  if (existing.UserStatus !== 'FORCE_CHANGE_PASSWORD') return null;
+  await sendCognito(
     new AdminCreateUserCommand({
       UserPoolId: config.userPoolId,
       Username: email,
-      UserAttributes: [
-        { Name: 'email', Value: email },
-        { Name: 'email_verified', Value: 'true' },
-        { Name: 'name', Value: name },
-      ],
+      MessageAction: 'RESEND',
       DesiredDeliveryMediums: ['EMAIL'],
     }),
     'admin',
   );
+  const userId = attributeValue(existing.UserAttributes, 'sub') ?? existing.Username;
+  const groups = await assignRole(userId, role);
+  return toApiUser(existing, groups);
+}
+
+/**
+ * POST /users: creates an account (Cognito e-mails a temporary password; the first login
+ * answers a NEW_PASSWORD_REQUIRED challenge) with the given role. Inviting again an account that
+ * never logged in re-sends the invitation (`resent: true`); other existing accounts -> 409.
+ * @returns {Promise<{ user: object, resent: boolean }>}
+ */
+export async function inviteUser({ email, name, role }, actor) {
+  let created;
+  try {
+    created = await sendCognito(
+      new AdminCreateUserCommand({
+        UserPoolId: config.userPoolId,
+        Username: email,
+        UserAttributes: [
+          { Name: 'email', Value: email },
+          { Name: 'email_verified', Value: 'true' },
+          { Name: 'name', Value: name },
+        ],
+        DesiredDeliveryMediums: ['EMAIL'],
+      }),
+      'admin',
+    );
+  } catch (err) {
+    if (!(err instanceof AppError && err.code === 'USER_EXISTS')) throw err;
+    const resent = await resendInvitation({ email, role });
+    if (!resent) throw err;
+    logger.info('Invitation re-sent', { userId: resent.id, role, by: actor?.userId });
+    return { user: resent, resent: true };
+  }
+  const { User: user } = created;
   const userId = attributeValue(user.Attributes, 'sub') ?? user.Username;
   try {
     await sendCognito(
@@ -671,7 +772,7 @@ export async function inviteUser({ email, name, role }, actor) {
   }
   await initProfile({ userId, email, displayName: name });
   logger.info('User invited', { userId, role, by: actor?.userId });
-  return toApiUser(user, [role]);
+  return { user: toApiUser(user, [role]), resent: false };
 }
 
 /**
@@ -710,8 +811,9 @@ export async function updateUser(actor, userId, { role, enabled }) {
   let groups;
   if (role !== undefined) groups = await assignRole(userId, role);
   if (enabled === false) {
-    await sendCognito(new AdminDisableUserCommand({ UserPoolId: config.userPoolId, Username: userId }), 'admin');
+    // Revoke the refresh tokens first (the call is certain to be accepted on an enabled account).
     await sendCognito(new AdminUserGlobalSignOutCommand({ UserPoolId: config.userPoolId, Username: userId }), 'admin');
+    await sendCognito(new AdminDisableUserCommand({ UserPoolId: config.userPoolId, Username: userId }), 'admin');
   } else if (enabled === true) {
     await sendCognito(new AdminEnableUserCommand({ UserPoolId: config.userPoolId, Username: userId }), 'admin');
   }

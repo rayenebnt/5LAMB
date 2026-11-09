@@ -2,6 +2,7 @@
 // (GET/POST /users, PATCH /users/{userId}: permission user:manage, i.e. administrators).
 
 import {
+  assertActiveAdministrator,
   getOrCreateProfile,
   getProfile,
   inviteUser,
@@ -76,23 +77,29 @@ async function getAuthor(req) {
   return ok(toPublicProfile(profile), cacheHeaders(null));
 }
 
+/** USER_MANAGE from the token, then the caller's current state in Cognito (see assertActiveAdministrator). */
+async function assertAdministrator(identity) {
+  assertCan(identity, PERMISSIONS.USER_MANAGE);
+  await assertActiveAdministrator(identity);
+}
+
 async function listAllUsers(req) {
-  assertCan(req.identity, PERMISSIONS.USER_MANAGE);
   const query = validate(listUsersQuery, req.query);
+  await assertAdministrator(req.identity);
   return ok(await listUsers(query), cacheHeaders(req.identity));
 }
 
 async function createUser(req) {
-  assertCan(req.identity, PERMISSIONS.USER_MANAGE);
   const input = validate(inviteSchema, req.body);
-  const user = await inviteUser(input, req.identity);
-  return created(user, `/users/${user.id}`);
+  await assertAdministrator(req.identity);
+  const { user, resent } = await inviteUser(input, req.identity);
+  return resent ? ok(user) : created(user, `/authors/${user.id}`);
 }
 
 async function patchUser(req) {
-  assertCan(req.identity, PERMISSIONS.USER_MANAGE);
   const { userId } = validate(userIdParams, req.params);
   const changes = validate(updateUserSchema, req.body);
+  await assertAdministrator(req.identity);
   return ok(await updateUser(req.identity, userId, changes));
 }
 

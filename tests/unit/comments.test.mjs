@@ -326,8 +326,20 @@ describe('GET /posts/{postId}/comments', () => {
   });
 });
 
+/** Comment items written by POST (always a transaction: Put comment + guard on the published post). */
+const commentPuts = () =>
+  inputs(TransactWriteCommand)
+    .map((input) => input.TransactItems[0].Put)
+    .filter(Boolean);
+const PUBLISHED_GUARD = {
+  TableName: 'blogify-test',
+  Key: keys.post(POST_ID),
+  ConditionExpression: 'attribute_exists(PK) AND #status = :published',
+  ExpressionAttributeNames: { '#status': 'status' },
+};
+
 describe('POST /posts/{postId}/comments', () => {
-  test('anonymous comment: trimmed, stored pending with a simple Put, e-mail kept private', async () => {
+  test('anonymous comment: trimmed, stored pending (guarded by the published post), e-mail kept private', async () => {
     seed(postItem());
     const res = await call(
       createRequest({ body: '  Très clair, merci !  ', authorName: ' Lectrice ', authorEmail: ' Lectrice@Example.COM ' }),
@@ -349,8 +361,12 @@ describe('POST /posts/{postId}/comments', () => {
     assert.equal(res.headers.Location, `/posts/${POST_ID}/comments/${comment.id}`);
     assert.ok(!res.body.includes('example.com'));
 
-    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 0);
-    const [put] = inputs(PutCommand);
+    const [{ TransactItems: items }] = inputs(TransactWriteCommand);
+    assert.equal(items.length, 2);
+    assert.deepEqual(items[1], {
+      ConditionCheck: { ...PUBLISHED_GUARD, ExpressionAttributeValues: { ':published': 'published' } },
+    });
+    const put = items[0].Put;
     assert.equal(put.TableName, 'blogify-test');
     assert.equal(put.ConditionExpression, 'attribute_not_exists(PK)');
     assert.deepEqual(put.Item, {
@@ -379,38 +395,41 @@ describe('POST /posts/{postId}/comments', () => {
     assert.equal(postRead.ConsistentRead, true);
   });
 
-  test('signed-in users with a role are approved at once: comment and counter in one transaction', async () => {
+  test('moderators are approved at once: comment and counter in one transaction; guest authors are moderated', async () => {
     seed(postItem());
     const res = await call(
       createRequest(
         { body: 'Merci pour cet article', authorName: 'Someone Else', authorEmail: 'spoof@evil.test' },
-        { token: tokenOf(users.author2) },
+        { token: tokenOf(users.editor) },
       ),
     );
     assert.equal(res.statusCode, 201, res.body);
     const comment = parse(res);
     assert.equal(comment.status, 'approved');
-    assert.deepEqual(comment.author, { id: users.author2.userId, name: users.author2.name });
+    assert.deepEqual(comment.author, { id: users.editor.userId, name: users.editor.name });
 
-    assert.equal(ddb.commandCalls(PutCommand).length, 0);
     const [{ TransactItems: items }] = inputs(TransactWriteCommand);
     assert.equal(items.length, 2);
     const { Put: put } = items[0];
     assert.equal(put.ConditionExpression, 'attribute_not_exists(PK)');
     assert.equal(put.Item.status, 'approved');
     assert.equal(put.Item.GSI1PK, 'COMMENTS#approved');
-    assert.equal(put.Item.authorId, users.author2.userId);
-    assert.equal(put.Item.authorName, users.author2.name, 'body authorName is ignored for signed-in users');
-    assert.equal(put.Item.authorEmail, users.author2.email, 'body authorEmail is ignored for signed-in users');
+    assert.equal(put.Item.authorId, users.editor.userId);
+    assert.equal(put.Item.authorName, users.editor.name, 'body authorName is ignored for signed-in users');
+    assert.equal(put.Item.authorEmail, users.editor.email, 'body authorEmail is ignored for signed-in users');
     assert.deepEqual(items[1], {
       Update: {
-        TableName: 'blogify-test',
-        Key: keys.post(POST_ID),
-        UpdateExpression: 'ADD commentCount :delta',
-        ConditionExpression: 'attribute_exists(PK)',
-        ExpressionAttributeValues: { ':delta': 1 },
+        ...PUBLISHED_GUARD,
+        UpdateExpression: 'ADD commentCount :one',
+        ExpressionAttributeValues: { ':one': 1, ':published': 'published' },
       },
     });
+
+    // Anyone can self-register as a guest author: such comments still go through moderation.
+    const guest = await call(createRequest({ body: 'Hello' }, { token: tokenOf(users.author2) }));
+    assert.equal(guest.statusCode, 201, guest.body);
+    assert.equal(parse(guest).status, 'pending');
+    assert.ok(inputs(TransactWriteCommand)[1].TransactItems[1].ConditionCheck, 'not counted');
   });
 
   test('signed-in users without any role are moderated like anonymous readers', async () => {
@@ -418,8 +437,7 @@ describe('POST /posts/{postId}/comments', () => {
     const res = await call(createRequest({ body: 'Hello' }, { token: tokenOf(users.noRole) }));
     assert.equal(res.statusCode, 201, res.body);
     assert.equal(parse(res).status, 'pending');
-    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 0);
-    const [put] = inputs(PutCommand);
+    const [put] = commentPuts();
     assert.equal(put.Item.authorId, users.noRole.userId);
     assert.equal(put.Item.authorName, users.noRole.name);
     assert.equal(put.Item.authorEmail, users.noRole.email);
@@ -438,7 +456,7 @@ describe('POST /posts/{postId}/comments', () => {
     const ok = await reply(PARENT_ID);
     assert.equal(ok.statusCode, 201, ok.body);
     assert.equal(parse(ok).parentId, PARENT_ID);
-    assert.equal(inputs(PutCommand)[0].Item.parentId, PARENT_ID);
+    assert.equal(commentPuts()[0].Item.parentId, PARENT_ID);
     const parentRead = inputs(GetCommand).find((input) => input.Key.SK === `COMMENT#${PARENT_ID}`);
     assert.deepEqual(parentRead.Key, keys.comment(POST_ID, PARENT_ID));
     assert.equal(parentRead.ConsistentRead, true);
@@ -447,7 +465,7 @@ describe('POST /posts/{postId}/comments', () => {
     assertError(await reply(SECOND_COMMENT_ID), 400, 'INVALID_PARENT'); // pending parent
     assertError(await reply(COMMENT_ID), 400, 'INVALID_PARENT'); // approved, but on another post
     assertError(await reply('not-a-uuid'), 400, 'VALIDATION_ERROR');
-    assert.equal(ddb.commandCalls(PutCommand).length, 1);
+    assert.equal(commentPuts().length, 1);
 
     // null or blank parentId = top-level comment
     for (const parentId of [null, '']) {
@@ -468,7 +486,7 @@ describe('POST /posts/{postId}/comments', () => {
     assert.deepEqual(botRest, legitRest, 'the bot cannot tell it was detected');
     assert.equal(botRest.status, 'pending');
 
-    const stored = inputs(PutCommand).map((put) => put.Item);
+    const stored = commentPuts().map((put) => put.Item);
     assert.equal(stored[0].status, 'pending');
     assert.equal(stored[1].status, 'spam');
     assert.equal(stored[1].GSI1PK, 'COMMENTS#spam', 'visible in the spam moderation queue');
@@ -477,8 +495,11 @@ describe('POST /posts/{postId}/comments', () => {
     // Even an account with a role is not auto-approved when the honeypot is filled.
     const editor = await call(createRequest({ body: 'Nice', website: 'x' }, { token: tokenOf(users.editor) }));
     assert.equal(parse(editor).status, 'pending');
-    assert.equal(inputs(PutCommand)[2].Item.status, 'spam');
-    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 0, 'spam is never counted');
+    assert.equal(commentPuts()[2].Item.status, 'spam');
+    assert.ok(
+      inputs(TransactWriteCommand).every(({ TransactItems }) => !TransactItems.some((item) => item.Update)),
+      'spam is never counted',
+    );
   });
 
   test('a blank honeypot (whitespace, null) is not spam', async () => {
@@ -487,7 +508,7 @@ describe('POST /posts/{postId}/comments', () => {
       const res = await call(createRequest({ body: 'Nice', authorName: 'Bob', website }));
       assert.equal(res.statusCode, 201, res.body);
     }
-    assert.deepEqual(inputs(PutCommand).map((put) => put.Item.status), ['pending', 'pending', 'pending']);
+    assert.deepEqual(commentPuts().map((put) => put.Item.status), ['pending', 'pending', 'pending']);
   });
 
   test('comment body validation (1-2000 characters after trimming, strict object)', async () => {
@@ -507,7 +528,7 @@ describe('POST /posts/{postId}/comments', () => {
     }
     assertError(await call(createRequest('{not json')), 400, 'BAD_REQUEST');
     assertError(await call(createRequest('[]')), 400, 'BAD_REQUEST');
-    assert.equal(ddb.commandCalls(PutCommand).length, 0);
+    assert.equal(commentPuts().length, 0);
 
     const longest = await call(createRequest({ body: ` ${'a'.repeat(2000)} `, authorName: 'Bob' }));
     assert.equal(longest.statusCode, 201, longest.body);
@@ -535,7 +556,7 @@ describe('POST /posts/{postId}/comments', () => {
     assert.equal(longest.statusCode, 201, longest.body);
     const blankEmail = await call(createRequest({ body: 'Hi', authorName: 'Bob', authorEmail: '' }));
     assert.equal(blankEmail.statusCode, 201, blankEmail.body);
-    assert.deepEqual(inputs(PutCommand).map((put) => put.Item.authorEmail), [null, null]);
+    assert.deepEqual(commentPuts().map((put) => put.Item.authorEmail), [null, null]);
   });
 
   test('signed-in users may send name/e-mail fields of any shape: they are ignored', async () => {
@@ -572,12 +593,14 @@ describe('POST /posts/{postId}/comments', () => {
     assert.equal((await call(createRequest(body))).statusCode, 201);
   });
 
-  test('post deleted between the read and the transaction: 404, nothing written', async () => {
+  test('post deleted or unpublished between the read and the transaction: 404, nothing written', async () => {
     seed(postItem());
     ddb.on(TransactWriteCommand).rejects(canceled('None', 'ConditionalCheckFailed'));
-    const res = await call(createRequest({ body: 'Hi' }, { token: tokenOf(users.author) }));
-    assertError(res, 404, 'NOT_FOUND');
-    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 1);
+    for (const options of [{ token: tokenOf(users.editor) }, {}]) {
+      const res = await call(createRequest({ body: 'Hi', ...(options.token ? {} : { authorName: 'Bob' }) }, options));
+      assertError(res, 404, 'NOT_FOUND');
+    }
+    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 2);
   });
 
   test('transaction conflicts on a busy post are retried, then reported as 409', async () => {
@@ -595,7 +618,7 @@ describe('POST /posts/{postId}/comments', () => {
 
   test('unexpected DynamoDB errors become a generic 500 without internals', async () => {
     seed(postItem());
-    ddb.on(PutCommand).rejects(new Error('Requested resource not found: Table: blogify-test not found'));
+    ddb.on(TransactWriteCommand).rejects(new Error('Requested resource not found: Table: blogify-test not found'));
     const res = await call(createRequest({ body: 'Hi', authorName: 'Bob' }));
     assertError(res, 500, 'INTERNAL_ERROR');
     assert.ok(!res.body.includes('blogify-test'));

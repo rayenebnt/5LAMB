@@ -9,7 +9,7 @@
 //      declared type, size limit and magic bytes are checked; the media becomes `ready` (download
 //      URL exposed) or `rejected` (object deleted, reason kept for a week).
 
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectTaggingCommand } from '@aws-sdk/client-s3';
 import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -417,6 +417,13 @@ async function deleteObject(bucket, key) {
   await s3().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
 
+/** S3 tag marking a validated object: the CloudFront read access of the bucket policy requires it. */
+export const VALIDATED_TAG = Object.freeze({ Key: 'blogify-status', Value: 'ready' });
+
+async function tagAsValidated(bucket, key) {
+  await s3().send(new PutObjectTaggingCommand({ Bucket: bucket, Key: key, Tagging: { TagSet: [VALIDATED_TAG] } }));
+}
+
 /**
  * Content type and size (HeadObject) and first bytes (ranged GetObject) of an object,
  * or null when the object no longer exists.
@@ -500,7 +507,8 @@ function updateReadySize(mediaId, size) {
  *   usable until it expires, an object can be replaced after validation, so a ready media is
  *   checked again (rejected if its new content is invalid) and a rejected media keeps no object.
  * S3 "not found" (object deleted meanwhile) and lost conditional updates are not errors; any
- * other error is rethrown so that EventBridge retries the event (then sends it to the DLQ).
+ * other error is rethrown: Lambda retries the asynchronous invocation twice, then sends the
+ * event to the dead-letter queue (EventInvokeConfig in template.yaml).
  * @param {{ bucket: string, key: string }} object bucket and decoded object key
  * @returns {Promise<{ outcome: string, mediaId?: string, reason?: string }>} see PROCESSING_OUTCOME
  */
@@ -521,15 +529,20 @@ export async function processUploadedObject({ bucket, key }) {
 
   const reason = uploadRejectionReason(item, object);
   if (reason) {
-    await deleteObject(bucket, key);
+    // Mark first, then delete: if the delete fails, the retried event finds a rejected media and
+    // deletes the stray object (the reverse order would leave a pending media without object).
     const rejected = await markRejected(mediaId, reason);
+    await deleteObject(bucket, key);
     return { outcome: rejected ? PROCESSING_OUTCOME.REJECTED : PROCESSING_OUTCOME.SKIPPED, mediaId, reason };
   }
+  // Only tagged (validated) objects can be read through CloudFront.
+  await tagAsValidated(bucket, key);
   if (item.status === MEDIA_STATUS.PENDING) {
     const ready = await markReady(mediaId, object.size);
     return { outcome: ready ? PROCESSING_OUTCOME.READY : PROCESSING_OUTCOME.SKIPPED, mediaId };
   }
-  // Already ready: duplicate event, or the object was replaced by another valid file.
+  // Already ready: duplicate event, or the object was replaced by another valid file (a new
+  // object carries no tag, hence the tagging above).
   if (object.size !== item.size) await updateReadySize(mediaId, object.size);
   return { outcome: PROCESSING_OUTCOME.UNCHANGED, mediaId };
 }

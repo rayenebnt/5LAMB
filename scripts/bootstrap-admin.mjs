@@ -10,6 +10,8 @@ import {
   AdminAddUserToGroupCommand,
   AdminCreateUserCommand,
   AdminGetUserCommand,
+  AdminListGroupsForUserCommand,
+  AdminRemoveUserFromGroupCommand,
   AdminSetUserPasswordCommand,
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
@@ -21,7 +23,9 @@ const password = args.password;
 const role = args.role ?? 'admin';
 const name = args.name ?? 'Administrator';
 
-if (!email || !password) {
+const ROLES = ['admin', 'editor', 'guest-author'];
+
+if (typeof email !== 'string' || typeof password !== 'string' || !ROLES.includes(role)) {
   console.error('Usage: node scripts/bootstrap-admin.mjs --email <email> --password <password> [--name <name>] [--stack <stack>] [--region <region>] [--user-pool-id <id>] [--role admin|editor|guest-author]');
   process.exit(1);
 }
@@ -56,6 +60,13 @@ try {
 await cognito.send(
   new AdminSetUserPasswordCommand({ UserPoolId: userPoolId, Username: username, Password: password, Permanent: true }),
 );
+// A user belongs to exactly one role group: leave the other ones first.
+const { Groups = [] } = await cognito.send(new AdminListGroupsForUserCommand({ UserPoolId: userPoolId, Username: username }));
+for (const { GroupName } of Groups) {
+  if (ROLES.includes(GroupName) && GroupName !== role) {
+    await cognito.send(new AdminRemoveUserFromGroupCommand({ UserPoolId: userPoolId, Username: username, GroupName }));
+  }
+}
 await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: userPoolId, Username: username, GroupName: role }));
 console.log(color.green(`User ${email} is now in group "${role}" with a permanent password.`));
 console.log(`Log in with: POST /auth/login {"email":"${email}","password":"..."}`);

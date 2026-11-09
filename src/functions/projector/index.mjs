@@ -14,7 +14,7 @@ import { batchWriteAll, keys, queryAll } from '../../lib/db.mjs';
 import { logger } from '../../lib/logger.mjs';
 import { POST_STATUS } from '../../lib/schema.mjs';
 import { projectSearchTerms } from '../../domain/search.mjs';
-import { projectTags } from '../../domain/tags.mjs';
+import { MEMBERSHIP_SUMMARY_ATTRIBUTES, projectTags, refreshMemberships } from '../../domain/tags.mjs';
 
 /** Post attributes on which the projections depend: changes of other attributes are skipped. */
 export const RELEVANT_FIELDS = Object.freeze([
@@ -41,6 +41,11 @@ const POST_PK_PREFIX = keys.post('').PK;
 export function hasRelevantChange(oldImage, newImage) {
   if (!oldImage || !newImage) return true;
   return RELEVANT_FIELDS.some((field) => !isDeepStrictEqual(oldImage[field], newImage[field]));
+}
+
+/** True when an attribute copied into the tag memberships changed (commentCount, version...). */
+export function hasSummaryChange(oldImage, newImage) {
+  return MEMBERSHIP_SUMMARY_ATTRIBUTES.some((field) => !isDeepStrictEqual(oldImage?.[field], newImage?.[field]));
 }
 
 /** The post item when it is published, null otherwise (absent image or other status). */
@@ -87,11 +92,14 @@ export async function processRecord(record) {
   const newImage = dynamodb.NewImage ? unmarshall(dynamodb.NewImage) : null;
   const outcome = { eventName, postId };
 
+  const before = publishedPost(oldImage);
+  const after = publishedPost(newImage);
   if (hasRelevantChange(oldImage, newImage)) {
-    const before = publishedPost(oldImage);
-    const after = publishedPost(newImage);
     outcome.tags = await projectTags(before, after);
     outcome.terms = await projectSearchTerms(before, after);
+  } else if (before && after && hasSummaryChange(oldImage, newImage)) {
+    // e.g. a comment counter update: refresh the summaries copied in the tag memberships only.
+    outcome.refreshed = await refreshMemberships(after);
   } else {
     outcome.skipped = true;
   }

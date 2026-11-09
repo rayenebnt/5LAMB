@@ -14,7 +14,7 @@
 // Subscriptions are SNS "email" subscriptions (double opt-in: SNS e-mails a confirmation link),
 // optionally restricted to some tags with a filter policy on the "tags" message attribute.
 
-import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import {
   ListSubscriptionsByTopicCommand,
   PublishCommand,
@@ -23,7 +23,7 @@ import {
 import { PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { dynamo, eventBridge, sns } from '../lib/aws.mjs';
 import { config } from '../lib/config.mjs';
-import { isConditionalCheckFailed, keys, tableName } from '../lib/db.mjs';
+import { keys, tableName } from '../lib/db.mjs';
 import { AppError, badRequest, conflict, isAwsError, serviceUnavailable } from '../lib/errors.mjs';
 import { nowIso } from '../lib/ids.mjs';
 import { logger } from '../lib/logger.mjs';
@@ -40,6 +40,7 @@ export const POST_PUBLISHED_EVENT = Object.freeze({
 export const NOTIFY_OUTCOME = Object.freeze({
   NOTIFIED: 'notified',
   ALREADY_NOTIFIED: 'already_notified',
+  POST_GONE: 'post_gone',
 });
 
 export const SUBSCRIPTION_STATUS = Object.freeze({
@@ -53,11 +54,7 @@ const PENDING_CONFIRMATION_ARN = 'PendingConfirmation';
 const EMAIL_PROTOCOLS = new Set(['email', 'email-json']);
 
 /** SNS errors caused by our own capacity (throttling, quotas): not the client's fault. */
-const SNS_CAPACITY_ERRORS = [
-  'ThrottledException',
-  'SubscriptionLimitExceededException',
-  'FilterPolicyLimitExceededException',
-];
+const SNS_CAPACITY_ERRORS = ['ThrottledException', 'SubscriptionLimitExceededException'];
 
 function topicArn() {
   const arn = config.topicArn;
@@ -159,21 +156,42 @@ export function postPublishedDetail(post) {
 // ---------------------------------------------------------------------------
 
 /**
- * Writes the idempotency marker of a post.
- * @returns {Promise<boolean>} false when the marker already exists (post already notified)
+ * Writes the idempotency marker of a post, in a transaction checking that the post still exists
+ * and is still published: a lagging delivery (retry after an SNS failure, post deleted or
+ * unpublished in the meantime) must neither e-mail subscribers nor recreate a marker in a partition
+ * the projector has already purged.
+ * @returns {Promise<'claimed'|'already_notified'|'post_gone'>}
  */
 export async function claimNotification(postId) {
   try {
     await dynamo().send(
-      new PutCommand({
-        TableName: tableName(),
-        Item: { ...keys.notification(postId), entityType: ENTITY.NOTIFICATION, postId, createdAt: nowIso() },
-        ConditionExpression: 'attribute_not_exists(PK)',
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: tableName(),
+              Key: keys.post(postId),
+              ConditionExpression: 'attribute_exists(PK) AND #status = :published',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':published': POST_STATUS.PUBLISHED },
+            },
+          },
+          {
+            Put: {
+              TableName: tableName(),
+              Item: { ...keys.notification(postId), entityType: ENTITY.NOTIFICATION, postId, createdAt: nowIso() },
+              ConditionExpression: 'attribute_not_exists(PK)',
+            },
+          },
+        ],
       }),
     );
-    return true;
+    return 'claimed';
   } catch (err) {
-    if (isConditionalCheckFailed(err)) return false;
+    if (err?.name !== 'TransactionCanceledException') throw err;
+    const [postReason, markerReason] = (err.CancellationReasons ?? []).map((reason) => reason?.Code);
+    if (postReason === 'ConditionalCheckFailed') return NOTIFY_OUTCOME.POST_GONE;
+    if (markerReason === 'ConditionalCheckFailed') return NOTIFY_OUTCOME.ALREADY_NOTIFIED;
     throw err;
   }
 }
@@ -238,13 +256,18 @@ export async function emitPostPublishedEvent(post) {
  * Notifies the first publication of a post: idempotency marker, SNS e-mail, EventBridge event.
  * Throws when the marker cannot be written or the e-mail cannot be sent (the caller retries).
  * @param {object} post post item (stream NewImage)
- * @returns {Promise<'notified'|'already_notified'>}
+ * @returns {Promise<'notified'|'already_notified'|'post_gone'>}
  */
 export async function notifyPostPublished(post) {
   const { postId } = post;
-  if (!(await claimNotification(postId))) {
+  const claim = await claimNotification(postId);
+  if (claim === NOTIFY_OUTCOME.ALREADY_NOTIFIED) {
     logger.info('Post already notified (duplicate delivery or re-publication)', { postId });
     return NOTIFY_OUTCOME.ALREADY_NOTIFIED;
+  }
+  if (claim === NOTIFY_OUTCOME.POST_GONE) {
+    logger.info('Post deleted or unpublished before its notification: nothing sent', { postId });
+    return NOTIFY_OUTCOME.POST_GONE;
   }
 
   let messageId;
@@ -306,12 +329,20 @@ export async function subscribe({ email, tags = [] }) {
     );
   } catch (err) {
     if (isAwsError(err, 'InvalidParameterException')) {
-      // SNS refuses to subscribe an endpoint again with different attributes (other tags).
+      // SNS refuses to subscribe an endpoint again with different attributes (other tags). The
+      // answer stays the same as for a new subscription, so that the endpoint never reveals who
+      // is subscribed; the subscriber keeps the preferences chosen first (unsubscribe to change).
       if (/already exists/i.test(err.message ?? '')) {
-        throw conflict('This e-mail address is already subscribed with different tags', 'ALREADY_SUBSCRIBED');
+        logger.info('Subscription request for an address already subscribed with other tags');
+        return { email, tags: normalizedTags };
       }
       logger.info('Subscription rejected by Amazon SNS', { reason: err.message });
       throw new AppError(400, 'INVALID_PARAMETER', 'Invalid subscription request');
+    }
+    if (isAwsError(err, 'FilterPolicyLimitExceededException')) {
+      // Permanent quota (200 filter policies per topic by default): retrying cannot help.
+      logger.error('SNS filter policy quota reached: tag-filtered subscriptions are full', { error: err });
+      throw conflict('Tag-filtered subscriptions are full, please subscribe without tags', 'TAG_SUBSCRIPTIONS_FULL');
     }
     if (isAwsError(err, ...SNS_CAPACITY_ERRORS)) throw snsUnavailable(err);
     throw err;

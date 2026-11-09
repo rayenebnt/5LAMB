@@ -37,7 +37,11 @@ function cognitoError(name, message = `${name}: detailed message from Cognito`) 
   return new idp[name]({ message, $metadata: { httpStatusCode: 400 } });
 }
 
+let customActorMock = false;
+
 function call(options) {
+  // Mocks defined last take precedence: re-register the administrator check after the test's own mocks.
+  if (options?.as === users.admin && !customActorMock) mockActiveAdmin();
   return handler(apiEvent(options), lambdaContext);
 }
 
@@ -48,7 +52,6 @@ function assertError(res, statusCode, code) {
 }
 
 const commandNames = () => cognito.calls().map((c) => c.args[0].constructor.name);
-const inputOf = (command, index = 0) => cognito.commandCalls(command)[index].args[0].input;
 
 /** A Cognito UserType as returned by ListUsers / ListUsersInGroup / AdminCreateUser. */
 function cognitoUser({ sub = TARGET, email = 'target@example.com', name = 'Terry Target', status = 'CONFIRMED', enabled = true } = {}) {
@@ -92,9 +95,25 @@ function profileItem(identity, overrides = {}) {
   };
 }
 
+/** The caller of the administration routes is re-checked in Cognito: an enabled administrator. */
+function mockActiveAdmin(identity = users.admin, { enabled = true, groups = ['admin'] } = {}) {
+  cognito
+    .on(AdminGetUserCommand, { Username: identity.userId })
+    .resolves(adminGetUser({ sub: identity.userId, email: identity.email, name: identity.name, enabled }));
+  cognito.on(AdminListGroupsForUserCommand, { Username: identity.userId }).resolves(groupsResponse(...groups));
+}
+
+/** Cognito commands sent for the administrator check (AdminGetUser + AdminListGroupsForUser of the caller). */
+const isActorCheck = (call) => call.args[0].input?.Username === users.admin.userId;
+const targetCalls = () => cognito.calls().filter((call) => !isActorCheck(call));
+const targetNames = () => targetCalls().map((c) => c.args[0].constructor.name);
+const targetCommandCalls = (command) => cognito.commandCalls(command).filter((call) => !isActorCheck(call));
+const inputOf = (command, index = 0) => targetCommandCalls(command)[index].args[0].input;
+
 beforeEach(() => {
   cognito.reset();
   ddb.reset();
+  customActorMock = false;
 });
 
 test('routes match the UsersFunction events of template.yaml', () => {
@@ -322,7 +341,7 @@ describe('GET /users', () => {
     for (const as of [users.editor, users.author, users.noRole]) {
       assertError(await call({ resource: '/users', as }), 403, 'FORBIDDEN');
     }
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 
   test('lists every user with their role (groups looked up per user)', async () => {
@@ -348,7 +367,7 @@ describe('GET /users', () => {
     assert.equal(res.headers['Cache-Control'], 'private, no-store');
     assert.deepEqual(inputOf(ListUsersCommand), { UserPoolId: POOL_ID, Limit: 20, PaginationToken: undefined });
     assert.deepEqual(
-      cognito.commandCalls(AdminListGroupsForUserCommand).map((c) => c.args[0].input.Username).sort(),
+      targetCommandCalls(AdminListGroupsForUserCommand).map((c) => c.args[0].input.Username).sort(),
       [OTHER, TARGET].sort(),
     );
 
@@ -360,15 +379,17 @@ describe('GET /users', () => {
     assert.deepEqual(inputOf(ListUsersCommand), { UserPoolId: POOL_ID, Limit: 60, PaginationToken: 'cognito-page-2' });
   });
 
-  test('filters by role with ListUsersInGroup (no per-user group lookup)', async () => {
-    cognito.on(ListUsersInGroupCommand).resolves({ Users: [cognitoUser()], NextToken: 'group-page-2' });
+  test('filters by role with ListUsersInGroup, reporting each member\'s highest role', async () => {
+    cognito.on(ListUsersInGroupCommand).resolves({ Users: [cognitoUser(), cognitoUser({ sub: OTHER })], NextToken: 'group-page-2' });
+    cognito.on(AdminListGroupsForUserCommand, { Username: TARGET }).resolves(groupsResponse('editor'));
+    cognito.on(AdminListGroupsForUserCommand, { Username: OTHER }).resolves(groupsResponse('editor', 'admin'));
     const res = await call({ resource: '/users', query: { role: 'editor', limit: '5' }, as: users.admin });
 
     assert.equal(res.statusCode, 200, res.body);
-    assert.deepEqual(parse(res).items.map((u) => [u.id, u.role]), [[TARGET, 'editor']]);
+    assert.deepEqual(parse(res).items.map((u) => [u.id, u.role]), [[TARGET, 'editor'], [OTHER, 'admin']]);
     assert.deepEqual(inputOf(ListUsersInGroupCommand), { UserPoolId: POOL_ID, GroupName: 'editor', Limit: 5, NextToken: undefined });
-    assert.equal(cognito.commandCalls(AdminListGroupsForUserCommand).length, 0);
-    assert.equal(cognito.commandCalls(ListUsersCommand).length, 0);
+    assert.equal(targetCommandCalls(AdminListGroupsForUserCommand).length, 2);
+    assert.equal(targetCommandCalls(ListUsersCommand).length, 0);
 
     const { nextCursor } = parse(res);
     cognito.resetHistory();
@@ -388,7 +409,7 @@ describe('GET /users', () => {
     assert.ok(first.nextCursor.length > 2048);
     const next = await call({ resource: '/users', query: { cursor: first.nextCursor }, as: users.admin });
     assert.equal(next.statusCode, 200, next.body);
-    assert.equal(cognito.commandCalls(ListUsersCommand)[1].args[0].input.PaginationToken, longToken);
+    assert.equal(targetCommandCalls(ListUsersCommand)[1].args[0].input.PaginationToken, longToken);
   });
 
   test('users deleted while the page is built are skipped', async () => {
@@ -417,7 +438,7 @@ describe('GET /users', () => {
     const res = await call({ resource: '/users', query: { limit: '25' }, as: users.admin });
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(parse(res).items.map((u) => u.id), listed.map((u) => u.Username), 'order is preserved');
-    assert.equal(cognito.commandCalls(AdminListGroupsForUserCommand).length, 25);
+    assert.equal(targetCommandCalls(AdminListGroupsForUserCommand).length, 25);
     assert.ok(maxInFlight > 1 && maxInFlight <= 10, `max in flight: ${maxInFlight}`);
   });
 
@@ -427,7 +448,7 @@ describe('GET /users', () => {
     for (const cursor of ['%%%', Buffer.from('{"token":""}').toString('base64url'), Buffer.from('[1]').toString('base64url')]) {
       assertError(await call({ resource: '/users', query: { cursor }, as: users.admin }), 400, 'BAD_REQUEST');
     }
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 
   test('Cognito throttling is answered 429', async () => {
@@ -448,7 +469,7 @@ describe('POST /users', () => {
     const res = await call({ method: 'POST', resource: '/users', as: users.admin, body: invite });
 
     assert.equal(res.statusCode, 201, res.body);
-    assert.equal(res.headers.Location, `/users/${TARGET}`);
+    assert.equal(res.headers.Location, `/authors/${TARGET}`);
     assert.deepEqual(parse(res), {
       id: TARGET,
       email: 'new.editor@example.com',
@@ -470,7 +491,7 @@ describe('POST /users', () => {
       DesiredDeliveryMediums: ['EMAIL'],
     });
     assert.deepEqual(inputOf(AdminAddUserToGroupCommand), { UserPoolId: POOL_ID, Username: TARGET, GroupName: 'editor' });
-    assert.deepEqual(commandNames(), ['AdminCreateUserCommand', 'AdminAddUserToGroupCommand']);
+    assert.deepEqual(targetNames(), ['AdminCreateUserCommand', 'AdminAddUserToGroupCommand']);
     const put = ddb.commandCalls(PutCommand)[0].args[0].input;
     assert.equal(put.ConditionExpression, 'attribute_not_exists(PK)');
     assert.equal(put.Item.PK, `USER#${TARGET}`);
@@ -494,9 +515,33 @@ describe('POST /users', () => {
 
   test('an e-mail address already registered is a 409 USER_EXISTS', async () => {
     cognito.on(AdminCreateUserCommand).rejects(cognitoError('UsernameExistsException'));
+    cognito.on(AdminGetUserCommand, { Username: 'new.editor@example.com' }).resolves(adminGetUser({ status: 'CONFIRMED' }));
     assertError(await call({ method: 'POST', resource: '/users', as: users.admin, body: invite }), 409, 'USER_EXISTS');
-    assert.deepEqual(commandNames(), ['AdminCreateUserCommand']);
+    assert.deepEqual(targetNames(), ['AdminCreateUserCommand', 'AdminGetUserCommand']);
     assert.equal(ddb.calls().length, 0);
+  });
+
+  test('inviting again an account that never logged in re-sends the invitation (200)', async () => {
+    cognito.on(AdminCreateUserCommand).rejects(cognitoError('UsernameExistsException'));
+    cognito
+      .on(AdminCreateUserCommand, { MessageAction: 'RESEND' })
+      .resolves({ User: cognitoUser({ status: 'FORCE_CHANGE_PASSWORD' }) });
+    cognito
+      .on(AdminGetUserCommand, { Username: 'new.editor@example.com' })
+      .resolves(adminGetUser({ status: 'FORCE_CHANGE_PASSWORD' }));
+    cognito.on(AdminListGroupsForUserCommand, { Username: TARGET }).resolves(groupsResponse('guest-author'));
+    cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
+    cognito.on(AdminAddUserToGroupCommand).resolves({});
+    const res = await call({ method: 'POST', resource: '/users', as: users.admin, body: invite });
+
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.headers.Location, undefined);
+    assert.equal(parse(res).role, 'editor');
+    assert.equal(parse(res).status, 'FORCE_CHANGE_PASSWORD');
+    const resend = targetCommandCalls(AdminCreateUserCommand).map((c) => c.args[0].input).find((input) => input.MessageAction);
+    assert.deepEqual(resend, { UserPoolId: POOL_ID, Username: 'new.editor@example.com', MessageAction: 'RESEND', DesiredDeliveryMediums: ['EMAIL'] });
+    assert.deepEqual(inputOf(AdminRemoveUserFromGroupCommand), { UserPoolId: POOL_ID, Username: TARGET, GroupName: 'guest-author' });
+    assert.deepEqual(inputOf(AdminAddUserToGroupCommand), { UserPoolId: POOL_ID, Username: TARGET, GroupName: 'editor' });
   });
 
   test('validates the body', async () => {
@@ -509,14 +554,14 @@ describe('POST /users', () => {
       { ...invite, password: 'Passw0rdX' },
     ];
     for (const body of invalid) assertError(await call({ method: 'POST', resource: '/users', as: users.admin, body }), 400, 'VALIDATION_ERROR');
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 
   test('requires authentication and the user:manage permission', async () => {
     assertError(await call({ method: 'POST', resource: '/users', body: invite }), 401, 'UNAUTHORIZED');
     assertError(await call({ method: 'POST', resource: '/users', as: users.editor, body: invite }), 403, 'FORBIDDEN');
     assertError(await call({ method: 'POST', resource: '/users', as: users.author, body: { ...invite, role: 'admin' } }), 403, 'FORBIDDEN');
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 });
 
@@ -542,7 +587,7 @@ describe('PATCH /users/{userId}', () => {
       createdAt: CREATED,
       updatedAt: MODIFIED,
     });
-    assert.deepEqual(commandNames(), [
+    assert.deepEqual(targetNames(), [
       'AdminListGroupsForUserCommand',
       'AdminRemoveUserFromGroupCommand',
       'AdminAddUserToGroupCommand',
@@ -562,7 +607,7 @@ describe('PATCH /users/{userId}', () => {
 
     assert.equal(parse(res).role, 'admin');
     assert.deepEqual(
-      cognito.commandCalls(AdminRemoveUserFromGroupCommand).map((c) => c.args[0].input.GroupName).sort(),
+      targetCommandCalls(AdminRemoveUserFromGroupCommand).map((c) => c.args[0].input.GroupName).sort(),
       ['editor', 'guest-author'],
     );
   });
@@ -575,7 +620,7 @@ describe('PATCH /users/{userId}', () => {
 
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(parse(res).role, 'editor');
-    assert.equal(cognito.commandCalls(AdminRemoveUserFromGroupCommand).length, 0);
+    assert.equal(targetCommandCalls(AdminRemoveUserFromGroupCommand).length, 0);
   });
 
   test('disabling an account also signs the user out everywhere', async () => {
@@ -588,8 +633,8 @@ describe('PATCH /users/{userId}', () => {
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(parse(res).enabled, false);
     assert.equal(parse(res).role, 'guest-author');
-    const names = commandNames();
-    assert.deepEqual(names.slice(0, 2), ['AdminDisableUserCommand', 'AdminUserGlobalSignOutCommand']);
+    const names = targetNames();
+    assert.deepEqual(names.slice(0, 2), ['AdminUserGlobalSignOutCommand', 'AdminDisableUserCommand']);
     assert.deepEqual(names.slice(2).sort(), ['AdminGetUserCommand', 'AdminListGroupsForUserCommand']);
     assert.deepEqual(inputOf(AdminDisableUserCommand), { UserPoolId: POOL_ID, Username: TARGET });
     assert.deepEqual(inputOf(AdminUserGlobalSignOutCommand), { UserPoolId: POOL_ID, Username: TARGET });
@@ -604,7 +649,7 @@ describe('PATCH /users/{userId}', () => {
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(parse(res).enabled, true);
     assert.deepEqual(inputOf(AdminEnableUserCommand), { UserPoolId: POOL_ID, Username: TARGET });
-    assert.equal(cognito.commandCalls(AdminUserGlobalSignOutCommand).length, 0);
+    assert.equal(targetCommandCalls(AdminUserGlobalSignOutCommand).length, 0);
   });
 
   test('role and enabled state in one request', async () => {
@@ -621,7 +666,7 @@ describe('PATCH /users/{userId}', () => {
       { role: parse(res).role, enabled: parse(res).enabled },
       { role: 'guest-author', enabled: false },
     );
-    assert.equal(cognito.commandCalls(AdminListGroupsForUserCommand).length, 1, 'groups are known after the role change');
+    assert.equal(targetCommandCalls(AdminListGroupsForUserCommand).length, 1, 'groups are known after the role change');
   });
 
   test('administrators cannot modify their own account (409 SELF_MODIFICATION)', async () => {
@@ -630,30 +675,59 @@ describe('PATCH /users/{userId}', () => {
       assertError(await patchUser(body, { userId: self }), 409, 'SELF_MODIFICATION');
     }
     assertError(await patchUser({ role: 'guest-author' }, { userId: self.toUpperCase() }), 409, 'SELF_MODIFICATION');
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 
   test('an unknown user is a 404', async () => {
     cognito.on(AdminListGroupsForUserCommand).rejects(cognitoError('UserNotFoundException'));
     assertError(await patchUser({ role: 'editor' }), 404, 'NOT_FOUND');
-    assert.equal(cognito.commandCalls(AdminAddUserToGroupCommand).length, 0);
+    assert.equal(targetCommandCalls(AdminAddUserToGroupCommand).length, 0);
 
-    cognito.on(AdminDisableUserCommand).rejects(cognitoError('UserNotFoundException'));
+    cognito.on(AdminUserGlobalSignOutCommand).rejects(cognitoError('UserNotFoundException'));
     assertError(await patchUser({ enabled: false }), 404, 'NOT_FOUND');
-    assert.equal(cognito.commandCalls(AdminUserGlobalSignOutCommand).length, 0);
+    assert.equal(targetCommandCalls(AdminDisableUserCommand).length, 0);
   });
 
   test('validates the identifier and the body', async () => {
     assertError(await patchUser({ role: 'editor' }, { userId: 'target@example.com' }), 400, 'VALIDATION_ERROR');
     const invalid = [{}, { role: 'superadmin' }, { enabled: 'false' }, { enabled: null }, { role: 'editor', email: 'x@example.com' }];
     for (const body of invalid) assertError(await patchUser(body), 400, 'VALIDATION_ERROR');
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
   });
 
   test('requires authentication and the user:manage permission', async () => {
     assertError(await call({ method: 'PATCH', resource: '/users/{userId}', params: { userId: TARGET }, body: { role: 'admin' } }), 401, 'UNAUTHORIZED');
     assertError(await patchUser({ role: 'admin' }, { as: users.editor }), 403, 'FORBIDDEN');
     assertError(await patchUser({ role: 'admin' }, { userId: users.author.userId, as: users.author }), 403, 'FORBIDDEN');
-    assert.equal(cognito.calls().length, 0);
+    assert.equal(targetCalls().length, 0);
+  });
+});
+
+describe('administrator re-check', () => {
+  test('a demoted or disabled administrator with a still valid token is refused (403)', async () => {
+    customActorMock = true;
+    cognito.on(ListUsersCommand).resolves({ Users: [] });
+    cognito.reset();
+    mockActiveAdmin(users.admin, { groups: ['editor'] });
+    assertError(await call({ resource: '/users', as: users.admin }), 403, 'FORBIDDEN');
+    assert.equal(targetCalls().length, 0, 'nothing is listed');
+
+    cognito.reset();
+    mockActiveAdmin(users.admin, { enabled: false });
+    assertError(
+      await call({ method: 'PATCH', resource: '/users/{userId}', params: { userId: TARGET }, as: users.admin, body: { role: 'admin' } }),
+      403,
+      'FORBIDDEN',
+    );
+    assert.equal(targetCalls().length, 0, 'no role was changed');
+
+    cognito.reset();
+    cognito.on(AdminGetUserCommand, { Username: users.admin.userId }).rejects(cognitoError('UserNotFoundException'));
+    cognito.on(AdminListGroupsForUserCommand, { Username: users.admin.userId }).rejects(cognitoError('UserNotFoundException'));
+    assertError(
+      await call({ method: 'POST', resource: '/users', as: users.admin, body: { email: 'x@example.com', name: 'X', role: 'admin' } }),
+      403,
+      'FORBIDDEN',
+    );
   });
 });

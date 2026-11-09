@@ -129,7 +129,7 @@ describe('POST /subscriptions', () => {
     assert.equal(snsMock.calls().length, 0);
   });
 
-  test('an address already subscribed with other tags is a 409 ALREADY_SUBSCRIBED', async () => {
+  test('an address already subscribed with other tags gets the same 202 answer (no enumeration)', async () => {
     snsMock
       .on(SubscribeCommand)
       .rejects(
@@ -139,8 +139,9 @@ describe('POST /subscriptions', () => {
         ),
       );
     const res = await subscribe({ email: 'reader@example.com', tags: ['aws'] });
-    assert.equal(res.statusCode, 409);
-    assert.equal(parse(res).error.code, 'ALREADY_SUBSCRIBED');
+    // Same answer as a new subscription: the endpoint never reveals who is subscribed.
+    assert.equal(res.statusCode, 202, res.body);
+    assert.equal(parse(res).status, 'pending_confirmation');
   });
 
   test('other invalid parameters reported by SNS are a 400 without SNS internals', async () => {
@@ -151,12 +152,19 @@ describe('POST /subscriptions', () => {
   });
 
   test('SNS throttling or quotas are a 503, unexpected errors a 500 that leaks nothing', async (t) => {
-    for (const name of ['ThrottledException', 'FilterPolicyLimitExceededException', 'SubscriptionLimitExceededException']) {
+    for (const name of ['ThrottledException', 'SubscriptionLimitExceededException']) {
       snsMock.on(SubscribeCommand).rejects(awsError(name, 'Rate exceeded'));
       const res = await subscribe({ email: 'reader@example.com' });
       assert.equal(res.statusCode, 503, name);
       assert.equal(parse(res).error.code, 'SERVICE_UNAVAILABLE');
+      assert.equal(res.headers['Retry-After'], '1');
     }
+
+    // The filter policy quota is permanent: a clear, non-retryable error.
+    snsMock.on(SubscribeCommand).rejects(awsError('FilterPolicyLimitExceededException', 'Filter policy limit exceeded'));
+    const full = await subscribe({ email: 'reader@example.com', tags: ['aws'] });
+    assert.equal(full.statusCode, 409);
+    assert.equal(parse(full).error.code, 'TAG_SUBSCRIPTIONS_FULL');
 
     snsMock.on(SubscribeCommand).rejects(awsError('AuthorizationErrorException', `User is not authorized on ${TOPIC_ARN}`));
     const denied = await subscribe({ email: 'reader@example.com' });

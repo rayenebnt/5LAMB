@@ -65,9 +65,9 @@ test('resolveIdentity: authorizer context, optional and required modes', async (
   assert.equal(await resolveIdentity(apiEvent({ token }), 'none'), null);
 });
 
-test('identityFromClaims falls back to the e-mail local part for the name', () => {
+test('identityFromClaims never derives the public name from the e-mail address', () => {
   const identity = identityFromClaims({ sub: 's', email: 'jane@example.com', 'cognito:groups': ['editor'] });
-  assert.equal(identity.name, 'jane');
+  assert.equal(identity.name, 'Anonymous');
   assert.equal(identity.role, 'editor');
 });
 
@@ -80,4 +80,20 @@ test('authorizer returns a stage-wide policy and the identity context', async ()
   assert.deepEqual(result.context, { userId: users.admin.userId, email: users.admin.email, name: users.admin.name, roles: 'admin' });
   await assert.rejects(authorizer({ methodArn, authorizationToken: 'Bearer nope' }), /Unauthorized/);
   await assert.rejects(authorizer({ methodArn, authorizationToken: `Bearer ${signIdToken(users.admin, { expiresIn: -5 })}` }), /Unauthorized/);
+});
+
+test('a JWKS download failure is a retryable 503 (not a 401) and an authorizer failure (not Unauthorized)', async () => {
+  const { FetchError } = await import('aws-jwt-verify/error');
+  const { setVerifier } = await import('../../src/lib/auth.mjs');
+  setVerifier({ verify: async () => { throw new FetchError('https://cognito-idp.example/jwks.json', 'socket hang up'); } });
+  try {
+    await assert.rejects(resolveIdentity(apiEvent({ token: signIdToken(users.author) }), 'optional'), { statusCode: 503 });
+    const methodArn = 'arn:aws:execute-api:eu-west-3:123456789012:abc123/dev/GET/posts';
+    await assert.rejects(
+      authorizer({ methodArn, authorizationToken: `Bearer ${signIdToken(users.author)}` }),
+      (err) => err.message !== 'Unauthorized',
+    );
+  } finally {
+    installTestVerifier();
+  }
 });

@@ -1,6 +1,7 @@
 // Media processor: validates every object uploaded to the media bucket.
-// Trigger: EventBridge rule on S3 "Object Created" events (key prefix media/, see template.yaml),
-// with retries and a dead-letter queue: unexpected errors are rethrown on purpose.
+// Trigger: EventBridge rule on S3 "Object Created" events (key prefix media/, see template.yaml).
+// Unexpected errors are rethrown on purpose: Lambda retries the asynchronous invocation twice,
+// then sends the event to the dead-letter queue (EventInvokeConfig).
 // The validation rules live in src/domain/media.mjs (processUploadedObject).
 
 import { decodeS3Key, PROCESSING_OUTCOME, processUploadedObject } from '../../domain/media.mjs';

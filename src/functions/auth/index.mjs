@@ -30,7 +30,8 @@ const session = z.string().trim().min(1, 'Session is required').max(2048);
 const registerSchema = z.strictObject({ email: schemas.email, password: schemas.password, name });
 const confirmSchema = z.strictObject({ email: schemas.email, code });
 const emailSchema = z.strictObject({ email: schemas.email });
-const loginSchema = z.strictObject({ email: schemas.email, password: schemas.password });
+// Login accepts any non-empty password: a wrong one is answered 401 by Cognito, never with the policy.
+const loginSchema = z.strictObject({ email: schemas.email, password: z.string().min(1, 'Password is required').max(256) });
 const refreshSchema = z.strictObject({ refreshToken });
 const newPasswordSchema = z.strictObject({ email: schemas.email, newPassword: schemas.password, session });
 const resetPasswordSchema = z.strictObject({ email: schemas.email, code, newPassword: schemas.password });

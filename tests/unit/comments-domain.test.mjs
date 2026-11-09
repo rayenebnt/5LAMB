@@ -84,11 +84,13 @@ test('moderator representation adds e-mail, post title and moderation data', () 
   assert.equal(api.author.id, null);
 });
 
-test('initialStatus: honeypot first, then role-based auto-approval', () => {
+test('initialStatus: honeypot first, then auto-approval for moderators only', () => {
   const identity = (roles) => ({ userId: 'u', name: 'U', email: null, roles });
   assert.equal(initialStatus(null, undefined), COMMENT_STATUS.PENDING);
   assert.equal(initialStatus(identity([]), undefined), COMMENT_STATUS.PENDING);
-  for (const role of ['guest-author', 'editor', 'admin']) {
+  // Anyone can self-register as a guest author: their comments are moderated too.
+  assert.equal(initialStatus(identity(['guest-author']), undefined), COMMENT_STATUS.PENDING);
+  for (const role of ['editor', 'admin']) {
     assert.equal(initialStatus(identity([role]), undefined), COMMENT_STATUS.APPROVED, role);
   }
   assert.equal(initialStatus(null, 'http://spam.example'), COMMENT_STATUS.SPAM);
@@ -161,7 +163,11 @@ test('other DynamoDB errors propagate unchanged', async () => {
   ddb.on(TransactWriteCommand).rejects(failure);
   await assert.rejects(moderateComment(users.editor, POST_ID, COMMENT_ID, 'rejected'), failure);
 
-  const throttled = canceled('ThrottlingError', 'None');
-  ddb.on(TransactWriteCommand).rejects(throttled);
-  await assert.rejects(moderateComment(users.editor, POST_ID, COMMENT_ID, 'approved'), throttled);
+  // Throttling cancellations are retried, then answered 503 (retryable by the client).
+  ddb.on(TransactWriteCommand).rejects(canceled('ThrottlingError', 'None'));
+  await assert.rejects(moderateComment(users.editor, POST_ID, COMMENT_ID, 'approved'), {
+    statusCode: 503,
+    code: 'SERVICE_UNAVAILABLE',
+  });
+  assert.equal(ddb.commandCalls(TransactWriteCommand).length, 1 + 3);
 });

@@ -93,6 +93,9 @@ Globals:
         ALLOWED_ORIGIN: !Ref AllowedOrigin
         APP_VERSION: '1.0.0'
         NODE_OPTIONS: --enable-source-maps
+        LOG_LEVEL: info
+        # Empty on AWS; declared so that `sam local invoke --env-vars` can point to DynamoDB Local.
+        DYNAMODB_ENDPOINT: ''
   Api:
     OpenApiVersion: '3.0.1'
 
@@ -379,6 +382,8 @@ Resources:
               Condition:
                 StringEquals:
                   AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${MediaDistribution}
+                  # Only objects validated by the media processor (tagged) are served by the CDN.
+                  s3:ExistingObjectTag/blogify-status: ready
             - !Ref AWS::NoValue
 
   MediaOriginAccessControl:
@@ -773,6 +778,21 @@ Resources:
             TableName: !Ref BlogTable
         - S3CrudPolicy:
             BucketName: !Ref MediaBucket
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObjectTagging
+              Resource: !Sub ${MediaBucket.Arn}/media/*
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ProcessingDLQ.QueueName
+      # Function errors: 2 asynchronous retries, then the event goes to the DLQ. (The rule's own
+      # RetryPolicy / DeadLetterConfig only cover failures to deliver the event to Lambda.)
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        MaximumEventAgeInSeconds: 3600
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt ProcessingDLQ.Arn
       Events:
         MediaUploaded:
           Type: EventBridgeRule

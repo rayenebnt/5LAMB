@@ -24,6 +24,10 @@ import {
 } from './helpers/dynamodb-local.mjs';
 
 const available = await isDynamoLocalAvailable();
+if (!available && process.env.REQUIRE_DYNAMODB_LOCAL === 'true') {
+  // In CI the scenario must run: a missing DynamoDB Local is a failure, not a skip.
+  throw new Error(`DynamoDB Local is required but not reachable on ${ENDPOINT}`);
+}
 const TABLE = `blogify-it-${Date.now()}`;
 
 const s3 = mockClient(S3Client);
@@ -255,11 +259,23 @@ describe('Blogify end-to-end scenario (DynamoDB Local)', { skip: !available && `
     });
     assert.equal(approve.statusCode, 200, approve.body);
 
-    const staff = await call(comments, {
+    // A self-registered guest author is moderated like an anonymous reader...
+    const guest = await call(comments, {
       method: 'POST',
       resource: '/posts/{postId}/comments',
       params: { postId: state.post.id },
       token: signIdToken(users.author2),
+      body: { body: 'Je découvre le serverless' },
+    });
+    assert.equal(guest.statusCode, 201, guest.body);
+    assert.equal(parse(guest).status, 'pending');
+
+    // ...while the editorial team is approved at once.
+    const staff = await call(comments, {
+      method: 'POST',
+      resource: '/posts/{postId}/comments',
+      params: { postId: state.post.id },
+      token: signIdToken(users.editor),
       body: { body: 'Réponse de l’équipe', parentId: state.comment.id },
     });
     assert.equal(staff.statusCode, 201, staff.body);
@@ -272,9 +288,21 @@ describe('Blogify end-to-end scenario (DynamoDB Local)', { skip: !available && `
     const post = await call(postsQuery, { resource: '/posts/{postId}', params: { postId: state.post.id } });
     assert.equal(parse(post).commentCount, 2);
 
-    // A comment-count change alone must not trigger a re-notification.
+    // A comment-count change alone must not trigger a re-notification...
     await replayer.drain();
     assert.equal(sns.commandCalls(PublishCommand).length, 1);
+    // ...but it refreshes the summaries copied in the tag memberships.
+    const byTag = await call(postsQuery, { resource: '/posts', query: { tag: 'dynamodb' } });
+    assert.equal(parse(byTag).items[0].commentCount, 2);
+    // Author listings are served by GSI2 (status in the sort key, no filter).
+    const byAuthor = await call(postsQuery, { resource: '/posts', query: { author: users.author.userId } });
+    assert.deepEqual(parse(byAuthor).items.map((p) => p.id), [state.post.id]);
+    const ownDrafts = await call(postsQuery, {
+      resource: '/posts',
+      query: { status: 'draft', author: 'me' },
+      token: signIdToken(users.author2),
+    });
+    assert.deepEqual(parse(ownDrafts).items.map((p) => p.id), [state.otherPost.id]);
   });
 
   test('media: presigned upload then validation by the processor', async () => {

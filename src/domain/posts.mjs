@@ -2,7 +2,7 @@
 //
 // Post item: PK POST#<postId> / SK POST, plus two index entries
 //   GSI1 POSTS#<status> / <publishedAt (published) or updatedAt (other statuses)>#<postId>
-//   GSI2 USER#<authorId> / POST#<createdAt>#<postId>
+//   GSI2 USER#<authorId> / POST#<status>#<same sort date as GSI1>#<postId>
 // Slug uniqueness relies on a SLUG#<slug> item written in the same transaction as the post.
 // Every modification made here increments `version` (optimistic locking, ETag "v<version>").
 // `commentCount` belongs to the comments domain (atomic ADD) and is never rewritten here:
@@ -211,7 +211,7 @@ export function buildPostItem({ postId, slug, input, author, now }) {
   return {
     ...keys.post(postId),
     ...indexKeys.postByStatus(DRAFT, now, postId),
-    ...indexKeys.postByAuthor(author.userId, now, postId),
+    ...indexKeys.postByAuthor(author.userId, DRAFT, now, postId),
     entityType: ENTITY.POST,
     postId,
     slug,
@@ -241,7 +241,7 @@ const PATCHABLE_FIELDS = ['title', 'content', 'tags', 'coverImageUrl', 'allowCom
 /**
  * Attributes to SET for a validated PATCH: the provided fields, the slug when it changes,
  * derived attributes (excerpt unless custom, reading time), updatedAt, version and, for
- * non-published posts, GSI1SK (those listings are sorted by updatedAt).
+ * non-published posts, GSI1SK and GSI2SK (those listings are sorted by updatedAt).
  */
 export function computePostChanges(post, patch, now) {
   const changes = {};
@@ -264,6 +264,7 @@ export function computePostChanges(post, patch, now) {
   changes.version = post.version + 1;
   if (post.status !== PUBLISHED) {
     changes.GSI1SK = indexKeys.postByStatus(post.status, now, post.postId).GSI1SK;
+    changes.GSI2SK = indexKeys.postByAuthor(post.authorId, post.status, now, post.postId).GSI2SK;
   }
   return changes;
 }
@@ -277,8 +278,9 @@ export function canTransition(identity, post, action) {
 }
 
 /**
- * Attributes to SET for an allowed workflow action: status, GSI1 keys (published posts are
- * sorted by publishedAt, the others by updatedAt), timestamps, review note and version.
+ * Attributes to SET for an allowed workflow action: status, GSI1 keys and GSI2 sort key
+ * (published posts are sorted by publishedAt, the others by updatedAt), timestamps, review note
+ * and version.
  */
 export function transitionChanges(post, action, { note = null, now }) {
   const status = WORKFLOW[action].to;
@@ -290,7 +292,11 @@ export function transitionChanges(post, action, { note = null, now }) {
   }
   if (action === 'reject') changes.reviewNote = note || null;
   const sortDate = status === PUBLISHED ? changes.publishedAt : now;
-  return { ...changes, ...indexKeys.postByStatus(status, sortDate, post.postId) };
+  return {
+    ...changes,
+    ...indexKeys.postByStatus(status, sortDate, post.postId),
+    GSI2SK: indexKeys.postByAuthor(post.authorId, status, sortDate, post.postId).GSI2SK,
+  };
 }
 
 const byStatus = (status) => ({
@@ -306,12 +312,11 @@ const byTag = (tag, authorId) => ({
   filter: authorId ? 'authorId = :authorId' : undefined,
 });
 
+// Key condition only: no filter, so cursors never point at another status' (hidden) post.
 const byAuthor = (authorId, status) => ({
   indexName: INDEXES.GSI2,
   keyCondition: 'GSI2PK = :pk AND begins_with(GSI2SK, :prefix)',
-  names: { '#status': 'status' },
-  values: { ':pk': `USER#${authorId}`, ':prefix': 'POST#', ':status': status },
-  filter: '#status = :status',
+  values: { ':pk': `USER#${authorId}`, ':prefix': `POST#${status}#` },
 });
 
 /**

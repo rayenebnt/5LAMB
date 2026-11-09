@@ -2,7 +2,7 @@
 //
 // Table "blogify-<stage>" — primary key (PK, SK) + 2 overloaded GSIs:
 //   GSI1 (GSI1PK, GSI1SK): listings by status / tag / moderation queue / all media
-//   GSI2 (GSI2PK, GSI2SK): listings by owner (posts and media of a user)
+//   GSI2 (GSI2PK, GSI2SK): listings by owner (posts by status and media of a user)
 // See docs/ARCHITECTURE.md for the full access-pattern table.
 
 import {
@@ -47,10 +47,14 @@ export const indexKeys = {
     GSI1PK: `POSTS#${status}`,
     GSI1SK: `${sortDate}#${postId}`,
   }),
-  /** GSI2: posts of an author, by creation date. */
-  postByAuthor: (authorId, createdAt, postId) => ({
+  /**
+   * GSI2: posts of an author by status, newest first (sort date as for GSI1: publishedAt for
+   * published posts, updatedAt otherwise). The status prefix serves each listing with a key
+   * condition only (no filter).
+   */
+  postByAuthor: (authorId, status, sortDate, postId) => ({
     GSI2PK: `USER#${authorId}`,
-    GSI2SK: `POST#${createdAt}#${postId}`,
+    GSI2SK: `POST#${status}#${sortDate}#${postId}`,
   }),
   /** GSI1: published posts having a tag, by publication date (tag membership items). */
   postByTag: (tag, publishedAt, postId) => ({

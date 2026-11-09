@@ -8,6 +8,7 @@ import {
   authorizerContextFromIdentity,
   extractBearerToken,
   identityFromClaims,
+  isKeyFetchFailure,
   verifyIdToken,
 } from '../../lib/auth.mjs';
 import { logger } from '../../lib/logger.mjs';
@@ -30,6 +31,12 @@ export async function handler(event) {
   try {
     claims = await verifyIdToken(token);
   } catch (err) {
+    if (isKeyFetchFailure(err)) {
+      // Any error other than 'Unauthorized' makes API Gateway answer 500 (AUTHORIZER_FAILURE):
+      // a JWKS outage must not make clients discard valid sessions.
+      logger.error('Cognito JWKS could not be fetched by the authorizer', { error: err });
+      throw new Error('Authorizer temporarily unavailable');
+    }
     logger.info('Token rejected by authorizer', { reason: err?.message });
     throw new Error('Unauthorized');
   }

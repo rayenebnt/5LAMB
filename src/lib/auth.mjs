@@ -7,8 +7,9 @@
 // Users without any group are authenticated but have no write permission (default deny).
 
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { FetchError, JwksNotAvailableInCacheError } from 'aws-jwt-verify/error';
 import { config } from './config.mjs';
-import { forbidden, unauthorized } from './errors.mjs';
+import { forbidden, serviceUnavailable, unauthorized } from './errors.mjs';
 import { logger } from './logger.mjs';
 
 export const ROLES = Object.freeze({
@@ -102,10 +103,9 @@ export function primaryRole(roles) {
   return parseRoles(roles)[0] ?? null;
 }
 
-function displayNameFrom(name, email) {
-  if (name && String(name).trim()) return String(name).trim();
-  if (email) return String(email).split('@')[0];
-  return 'Anonymous';
+function displayNameFrom(name) {
+  // Never derived from the e-mail address: display names are public (posts, comments, profiles).
+  return name && String(name).trim() ? String(name).trim() : 'Anonymous';
 }
 
 /** Identity from verified Cognito ID token claims. */
@@ -114,7 +114,7 @@ export function identityFromClaims(claims) {
   return {
     userId: claims.sub,
     email: claims.email ?? null,
-    name: displayNameFrom(claims.name, claims.email),
+    name: displayNameFrom(claims.name),
     roles,
     role: roles[0] ?? null,
   };
@@ -126,7 +126,7 @@ export function identityFromAuthorizerContext(context) {
   return {
     userId: context.userId,
     email: context.email || null,
-    name: displayNameFrom(context.name, context.email),
+    name: displayNameFrom(context.name),
     roles,
     role: roles[0] ?? null,
   };
@@ -212,6 +212,14 @@ export async function verifyIdToken(token) {
   return getVerifier().verify(token);
 }
 
+/**
+ * True when a verification failed because the Cognito public keys (JWKS) could not be fetched:
+ * an infrastructure problem (answered 5xx, retryable), not an invalid token (401).
+ */
+export function isKeyFetchFailure(err) {
+  return err instanceof FetchError || err instanceof JwksNotAvailableInCacheError;
+}
+
 function headerValue(event, name) {
   const headers = event?.headers ?? {};
   const wanted = name.toLowerCase();
@@ -246,6 +254,10 @@ export async function resolveIdentity(event, mode = 'none') {
   try {
     return identityFromClaims(await verifyIdToken(token));
   } catch (err) {
+    if (isKeyFetchFailure(err)) {
+      logger.error('Cognito JWKS could not be fetched', { error: err });
+      throw serviceUnavailable('Authentication is temporarily unavailable, please retry');
+    }
     logger.info('Rejected token', { reason: err?.message });
     throw unauthorized('Invalid or expired token');
   }

@@ -2,7 +2,8 @@ import '../helpers/env.mjs';
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { marshall } from '@aws-sdk/util-dynamodb';
@@ -25,6 +26,18 @@ const markerId = (postId) => `POST#${postId}|NOTIFICATION`;
 
 /** Notification markers of the fake table (attribute_not_exists(PK) is honoured). */
 let markers;
+/** Posts deleted or unpublished in the fake table (the claim's ConditionCheck fails for them). */
+let gonePosts;
+
+const canceled = (...codes) =>
+  new TransactionCanceledException({
+    message: `Transaction cancelled [${codes.join(', ')}]`,
+    $metadata: {},
+    CancellationReasons: codes.map((Code) => ({ Code })),
+  });
+
+/** Marker Put of the claim transaction (second item; the first one checks the post). */
+const markerPut = (index = 0) => ddb.commandCalls(TransactWriteCommand)[index].args[0].input.TransactItems[1].Put;
 /** Side effects in call order across DynamoDB, SNS and EventBridge. */
 let calls;
 
@@ -33,14 +46,19 @@ beforeEach(() => {
   snsMock.reset();
   eventsMock.reset();
   markers = new Map();
+  gonePosts = new Set();
   calls = [];
-  ddb.on(PutCommand).callsFake(async (input) => {
+  ddb.on(TransactWriteCommand).callsFake(async (input) => {
     calls.push('marker');
-    const id = `${input.Item.PK}|${input.Item.SK}`;
-    if (input.ConditionExpression === 'attribute_not_exists(PK)' && markers.has(id)) {
-      throw awsError('ConditionalCheckFailedException', 'The conditional request failed');
+    const [{ ConditionCheck: check }, { Put: put }] = input.TransactItems;
+    assert.equal(check.ConditionExpression, 'attribute_exists(PK) AND #status = :published');
+    const postGone = gonePosts.has(check.Key.PK);
+    const id = `${put.Item.PK}|${put.Item.SK}`;
+    const markerExists = put.ConditionExpression === 'attribute_not_exists(PK)' && markers.has(id);
+    if (postGone || markerExists) {
+      throw canceled(postGone ? 'ConditionalCheckFailed' : 'None', markerExists ? 'ConditionalCheckFailed' : 'None');
     }
-    markers.set(id, input.Item);
+    markers.set(id, put.Item);
     return {};
   });
   ddb.on(DeleteCommand).callsFake(async (input) => {
@@ -149,7 +167,7 @@ describe('notifier: first publication of a post', () => {
     assert.deepEqual(await handler({ Records: [transition(item, 'in_review')] }), SUCCESS);
     assert.deepEqual(calls, ['marker', 'sns', 'events']);
 
-    const putInput = ddb.commandCalls(PutCommand)[0].args[0].input;
+    const putInput = markerPut();
     const { createdAt, ...marker } = putInput.Item;
     assert.equal(putInput.TableName, TABLE);
     assert.equal(putInput.ConditionExpression, 'attribute_not_exists(PK)');
@@ -282,7 +300,7 @@ describe('notifier: idempotency', () => {
 
     assert.equal(snsMock.commandCalls(PublishCommand).length, 1);
     assert.equal(eventsMock.commandCalls(PutEventsCommand).length, 1);
-    assert.equal(ddb.commandCalls(PutCommand).length, 4, 'one marker written, three rejected by the condition');
+    assert.equal(ddb.commandCalls(TransactWriteCommand).length, 4, 'one marker written, three rejected by the condition');
     assert.equal(ddb.commandCalls(DeleteCommand).length, 0);
     assert.deepEqual([...markers.keys()], [markerId(POST_A)]);
   });
@@ -342,7 +360,7 @@ describe('notifier: failures', () => {
   });
 
   test('a DynamoDB error while writing the marker fails the record before any e-mail', async () => {
-    ddb.on(PutCommand).rejects(awsError('ProvisionedThroughputExceededException', 'Rate exceeded'));
+    ddb.on(TransactWriteCommand).rejects(awsError('ProvisionedThroughputExceededException', 'Rate exceeded'));
     const records = [transition(post(POST_A), 'in_review'), transition(post(POST_B), 'in_review')];
     assert.deepEqual(await handler({ Records: records }), failureOf(records[0]));
     assert.equal(snsMock.calls().length, 0);
@@ -381,5 +399,17 @@ describe('notifier: failures', () => {
     );
     assert.equal(errors[0].error.message, 'EventBridge is unavailable');
     assert.equal(errors[1].errorCode, 'InternalFailure');
+  });
+});
+
+describe('notifier: post deleted or unpublished meanwhile', () => {
+  test('a lagging delivery sends nothing and writes no marker', async () => {
+    gonePosts.add(`POST#${POST_A}`);
+    const record = transition(post(POST_A), 'in_review');
+    assert.deepEqual(await handler({ Records: [record] }), SUCCESS);
+    assert.deepEqual(calls, ['marker']);
+    assert.equal(markers.size, 0, 'no orphan marker in a purged partition');
+    assert.equal(snsMock.calls().length, 0);
+    assert.equal(eventsMock.calls().length, 0);
   });
 });
