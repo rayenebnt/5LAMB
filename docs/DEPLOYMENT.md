@@ -26,7 +26,7 @@ plateforme Blogify sur un compte AWS (y compris un compte **AWS Academy Learner 
 |---|---|---|
 | Compte AWS | droits CloudFormation, IAM, Lambda, API Gateway, DynamoDB, S3, Cognito, SNS, SQS, EventBridge, CloudFront, CloudWatch | — |
 | AWS CLI | v2 | `aws --version` |
-| AWS SAM CLI | ≥ 1.120 | `sam --version` |
+| AWS SAM CLI | ≥ 1.148 (support du runtime nodejs24.x) | `sam --version` |
 | Node.js + npm | Node ≥ 22 (les fonctions tournent en Node.js 24 sur Lambda) | `node --version` |
 | Git | — | `git --version` |
 | Docker *(optionnel)* | pour DynamoDB Local et `sam local` | `docker --version` |
@@ -127,7 +127,7 @@ aws cloudformation describe-stacks --stack-name blogify-dev \
 | `ApiUrl` | URL de base de l'API, ex. `https://abc123.execute-api.eu-west-3.amazonaws.com/dev` |
 | `DocsUrl` | Documentation interactive Swagger UI (`<ApiUrl>/docs`) |
 | `UserPoolId`, `UserPoolClientId` | Configuration Cognito (utile si un front-end utilise Amplify) |
-| `TableName`, `MediaBucketName`, `MediaCdnDomain` | Ressources de données |
+| `TableName`, `MediaBucketName`, `MediaCdnDomain`, `MediaDistributionId` | Ressources de données |
 | `NewPostTopicArn` | Topic SNS de la newsletter |
 | `ProcessingDLQUrl` | File des traitements asynchrones en échec |
 
@@ -251,7 +251,8 @@ CloudFormation indépendante (table, user pool, bucket… séparés).
   | stats count() by message.route
   ```
 
-- **Traces** : console X-Ray → *Service map* (API Gateway → Lambda → DynamoDB/S3/SNS).
+- **Traces** : console X-Ray → *Service map* (API Gateway → fonctions Lambda, avec la durée de
+  chaque invocation ; les appels au SDK AWS ne sont pas instrumentés).
 - **Métriques** : API Gateway (`Count`, `4XXError`, `5XXError`, `Latency`), Lambda (`Errors`,
   `Throttles`, `Duration`, `ConcurrentExecutions`), DynamoDB (`ConsumedRead/WriteCapacityUnits`,
   `ThrottledRequests`), SQS (`ApproximateNumberOfMessagesVisible` de la DLQ).
@@ -301,6 +302,8 @@ journaux sont supprimés avec la stack.
 | `not authorized to perform: iam:CreateRole` | Compte sans droits IAM (AWS Academy) : renseigner `LambdaRoleArn` |
 | `401 UNAUTHORIZED` sur une route protégée | Envoyer le **idToken** (pas l'accessToken) : `Authorization: Bearer <idToken>` ; jeton expiré après 60 min → `POST /auth/refresh` |
 | `403` juste après un changement de rôle | Le rôle est lu dans le jeton : se reconnecter ou rafraîchir le jeton |
+| Un compte désactivé accède encore à l'API quelques minutes | API Gateway garde la décision de l'authorizer 5 min par jeton ; les routes d'administration revérifient l'état du compte à chaque appel |
+| Média supprimé encore visible via CloudFront | Le CDN garde une copie jusqu'à 24 h : `aws cloudfront create-invalidation --distribution-id <MediaDistributionId> --paths "/media/<mediaId>/*"` |
 | `403 USER_NOT_CONFIRMED` à la connexion | Confirmer avec `POST /auth/confirm` (code reçu par e-mail) ou déployer avec `AutoConfirmUsers=true` |
 | Erreur CORS dans le navigateur | Le paramètre `AllowedOrigin` doit correspondre exactement à l'origine du front-end |
 | Média bloqué en `pending` | Vérifier que l'upload S3 a renvoyé `204`, puis les journaux de `MediaProcessorFunction` et la DLQ |

@@ -107,7 +107,7 @@ Optimisations **déjà en place** :
 | Webhooks pour les intégrateurs (rebuild Next.js, Netlify, Slack…) | EventBridge API Destinations | Règle sur `source = blogify.posts` |
 | Multi-tenant (un blog par entreprise) | Cognito (attribut `tenantId`), clés préfixées par tenant, IAM `dynamodb:LeadingKeys`, plans d'usage API Gateway | Isolation logique des données et quotas par client |
 | Sécurité renforcée | AWS WAF, Cognito Threat Protection + MFA, AWS Shield | Activation sur API Gateway / CloudFront / user pool |
-| Observabilité avancée | Powertools for AWS Lambda (métriques EMF), tableaux de bord et alarmes CloudWatch, X-Ray | Alarmes sur taux de 5XX, latence p99, profondeur de la DLQ, throttles |
+| Observabilité avancée | Powertools for AWS Lambda (Tracer, métriques EMF), tableaux de bord et alarmes CloudWatch | Instrumenter les clients du SDK (X-Ray) pour voir DynamoDB, S3 et SNS dans la *service map* ; alarmes sur taux de 5XX, latence p99, profondeur de la DLQ, throttles |
 | Déploiements sans risque | SAM `AutoPublishAlias` + `DeploymentPreference` (canary 10 %) + CodeDeploy | Retour arrière automatique sur alarme |
 | CI/CD | GitHub Actions + OIDC (rôle IAM sans clé longue durée) | Pipeline existant (`.github/workflows/ci.yml`) étendu avec `sam deploy` |
 

@@ -32,8 +32,8 @@ Mini-projet AWS Lambda · API REST · DynamoDB · S3 · Cognito
 | *Optionnel* : recherche | ✔ |
 | *Optionnel* : notifications aux abonnés | ✔ |
 
-Chiffres clés : **42 routes REST**, **13 fonctions Lambda**, 1 table DynamoDB, tests unitaires et
-d'intégration, documentation OpenAPI interactive.
+Chiffres clés : **42 routes REST**, **13 fonctions Lambda**, 1 table DynamoDB, **503 tests
+unitaires** et un scénario d'intégration de 8 étapes, documentation OpenAPI interactive.
 
 ## 4. Architecture globale
 
@@ -80,7 +80,8 @@ CloudWatch + X-Ray · AWS SAM (Infrastructure as Code).
 ## 10. Sécurité — autorisations
 
 Matrice RBAC (admin / editor / guest-author / anonyme) + contrôle de propriété ; 404 pour les
-ressources invisibles ; un auteur invité ne peut pas publier ; un admin ne peut pas se rétrograder.
+ressources invisibles ; un auteur invité ne peut pas publier ; un admin ne peut pas se rétrograder,
+et les opérations d'administration revérifient l'état du compte dans Cognito.
 **Moindre privilège** : un rôle IAM par fonction, lecture seule pour les fonctions publiques.
 
 ## 11. Sécurité — données et entrées
@@ -126,8 +127,8 @@ Puis `POST /posts/{id}/submit` (auteur) → `POST /posts/{id}/publish` (éditeur
 ## 15. Workflow éditorial et commentaires
 
 Diagramme d'états : `draft → in_review → published → archived` (+ rejet avec note, dépublication).
-Commentaires : anonymes en attente de modération, membres approuvés automatiquement, compteur
-atomique, réponses à un commentaire.
+Commentaires : lecteurs et auteurs invités en attente de modération, équipe éditoriale approuvée
+automatiquement, compteur atomique, réponses à un commentaire.
 
 ## 16. Fonctionnalités optionnelles
 
@@ -138,12 +139,13 @@ atomique, réponses à un commentaire.
 
 ## 17. Résilience et observabilité
 
-Retries, découpage des lots, échecs partiels, DLQ SQS, consommateurs idempotents ; journaux JSON
-structurés, traces X-Ray, `GET /health`.
+Retries, découpage des lots, échecs partiels, DLQ SQS, consommateurs idempotents, délais réseau
+bornés ; journaux JSON structurés, traces X-Ray (API Gateway et Lambda), `GET /health`.
 
 ## 18. Qualité et déploiement
 
-- Tests unitaires (SDK AWS simulé) + intégration sur DynamoDB Local avec rejeu des Streams.
+- 503 tests unitaires (SDK AWS simulé) + intégration sur DynamoDB Local avec rejeu des Streams ;
+  revue adversariale indépendante de chaque domaine, constats corrigés.
 - Smoke test de bout en bout sur la stack réelle ; CI GitHub Actions ; `cfn-lint`.
 - Déploiement : `npm run deploy:guided` (paramètres : stage, CORS, CDN, AWS Academy `LabRole`…).
 

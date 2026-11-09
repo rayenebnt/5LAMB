@@ -973,6 +973,10 @@ Outputs:
   MediaCdnDomain:
     Condition: UseMediaCdn
     Value: !GetAtt MediaDistribution.DomainName
+  MediaDistributionId:
+    Description: CloudFront distribution of the media (for cache invalidations)
+    Condition: UseMediaCdn
+    Value: !Ref MediaDistribution
   NewPostTopicArn:
     Value: !Ref NewPostTopic
   ProcessingDLQUrl:

@@ -106,7 +106,7 @@ Les traitements se répartissent en deux familles :
 | Événements | Amazon EventBridge | Notifications S3 « Object Created » et événements métier `PostPublished` |
 | Notifications | Amazon SNS | Newsletter par e-mail avec double opt-in et filtrage par tags |
 | Gestion des erreurs | Amazon SQS | File de lettres mortes (DLQ) pour les traitements asynchrones |
-| Observabilité | Amazon CloudWatch Logs + AWS X-Ray | Journaux JSON structurés (rétention configurable), traces distribuées |
+| Observabilité | Amazon CloudWatch Logs + AWS X-Ray | Journaux JSON structurés (rétention configurable), traces X-Ray d'API Gateway et de chaque fonction |
 
 ### Fonctions Lambda
 
@@ -172,14 +172,15 @@ sequenceDiagram
   C->>S: POST multipart (fields + fichier)
   S-->>C: 204
   S->>E: Object Created
-  E->>V: événement (retries + DLQ)
+  E->>V: événement (2 nouvelles tentatives, puis DLQ)
   V->>S: HeadObject + lecture des 32 premiers octets
   V->>V: contrôle type MIME, taille, signature binaire (magic bytes)
   alt fichier valide
+    V->>S: tag blogify-status=ready (seuls les fichiers tagués sont servis par CloudFront)
     V->>D: status = ready (suppression du TTL)
   else fichier invalide
-    V->>S: DeleteObject
     V->>D: status = rejected (+ raison)
+    V->>S: DeleteObject
   end
   C->>M: GET /media/{id}
   M-->>C: {status: ready, url: https://cdn.../media/...}
@@ -212,7 +213,7 @@ sequenceDiagram
     Pr->>D: termes de l'index de recherche (BatchWrite)
   and Notifications
     St->>N: enregistrements filtrés (status = published)
-    N->>D: marqueur d'idempotence (Put conditionnel)
+    N->>D: marqueur d'idempotence (transaction : article toujours publié)
     N->>S: Publish (e-mail aux abonnés, attribut "tags")
     N->>E: PutEvents PostPublished (webhooks, rebuild d'un site statique...)
   end
@@ -248,7 +249,7 @@ Chaque motif d'accès est servi par **une seule requête `Query` ou `GetItem`**,
 
 | Entité | PK | SK | GSI1PK / GSI1SK | GSI2PK / GSI2SK |
 |---|---|---|---|---|
-| Article | `POST#<postId>` | `POST` | `POSTS#<status>` / `<date>#<postId>` | `USER#<authorId>` / `POST#<createdAt>#<postId>` |
+| Article | `POST#<postId>` | `POST` | `POSTS#<status>` / `<date>#<postId>` | `USER#<authorId>` / `POST#<status>#<date>#<postId>` |
 | Réservation de slug | `SLUG#<slug>` | `SLUG` | – | – |
 | Commentaire | `POST#<postId>` | `COMMENT#<commentId>` | `COMMENTS#<status>` / `<createdAt>#<commentId>` | – |
 | Marqueur de notification | `POST#<postId>` | `NOTIFICATION` | – | – |
@@ -258,7 +259,9 @@ Chaque motif d'accès est servi par **une seule requête `Query` ou `GetItem`**,
 | Compteur de tag (projection) | `TAGS` | `TAG#<tag>` | – | – |
 | Terme de recherche (projection) | `TERM#<terme>` | `POST#<postId>` | – | – |
 
-Pour un article publié, `<date>` vaut `publishedAt` ; pour les autres statuts, `updatedAt`.
+Pour un article publié, `<date>` vaut `publishedAt` ; pour les autres statuts, `updatedAt`. Le
+statut fait partie de la clé de tri de GSI2 : chaque liste d'un auteur est servie par une simple
+condition de clé, sans filtre.
 Les identifiants sont des **UUID v7** : ils sont ordonnés dans le temps, ce qui trie naturellement
 les commentaires par date de création dans la partition de leur article.
 
@@ -270,7 +273,7 @@ les commentaires par date de création dans la partition de leur article.
 | AP2 | Lire un article par slug | `GetItem SLUG#slug` → `GetItem` article |
 | AP3 | Lister les articles publiés (plus récents d'abord) | `Query GSI1 PK=POSTS#published` (ordre décroissant) |
 | AP4 | File de relecture des éditeurs / brouillons | `Query GSI1 PK=POSTS#in_review` (ou `draft`, `archived`) |
-| AP5 | Articles d'un auteur | `Query GSI2 PK=USER#id, SK begins_with POST#` |
+| AP5 | Articles d'un auteur, par statut | `Query GSI2 PK=USER#id, SK begins_with POST#<status>#` |
 | AP6 | Articles publiés d'un tag | `Query GSI1 PK=TAG#tag` |
 | AP7 | Nuage de tags avec compteurs | `Query PK=TAGS` |
 | AP8 | Recherche plein texte | `Query PK=TERM#terme` par terme, puis classement |
@@ -306,7 +309,7 @@ les commentaires par date de création dans la partition de leur article.
   "GSI1PK": "POSTS#published",
   "GSI1SK": "2026-10-27T10:00:00.000Z#0192f5a1-7c2b-7d3e-8f40-0a1b2c3d4e5f",
   "GSI2PK": "USER#33333333-3333-4333-8333-333333333333",
-  "GSI2SK": "POST#2026-10-27T09:00:00.000Z#0192f5a1-7c2b-7d3e-8f40-0a1b2c3d4e5f"
+  "GSI2SK": "POST#published#2026-10-27T10:00:00.000Z#0192f5a1-7c2b-7d3e-8f40-0a1b2c3d4e5f"
 }
 ```
 
@@ -321,8 +324,9 @@ les commentaires par date de création dans la partition de leur article.
   dans le commentaire (contexte pour les modérateurs) et le résumé de l'article dans les éléments
   de tags et de recherche, pour éviter toute lecture supplémentaire.
 - **Vues matérialisées par événements** : les index de tags et de recherche sont recalculés par la
-  fonction `Projector` à partir du flux DynamoDB (ancienne et nouvelle image). Ils sont donc
-  **cohérents à terme** (en pratique en moins d'une seconde).
+  fonction `Projector` à partir du flux DynamoDB (ancienne et nouvelle image). Un simple changement du
+  nombre de commentaires ne rafraîchit que les copies des tags, pas l'index de recherche. Ces vues
+  sont **cohérentes à terme** (en pratique en moins d'une seconde).
 - **Unicité des slugs** : un élément `SLUG#<slug>` est écrit dans la même transaction que l'article ;
   la condition `attribute_not_exists` garantit qu'aucun slug n'est attribué deux fois.
 - **Concurrence optimiste** : chaque article porte un numéro `version` ; l'API renvoie un en-tête
@@ -338,15 +342,19 @@ les commentaires par date de création dans la partition de leur article.
 ### 6.1 Authentification
 
 - **Amazon Cognito** gère les comptes : politique de mots de passe (8 caractères minimum, majuscule,
-  minuscule, chiffre), vérification de l'adresse e-mail par code, récupération de compte par e-mail,
-  messages d'erreur ne révélant pas l'existence d'un compte (`PreventUserExistenceErrors`).
+  minuscule, chiffre), vérification de l'adresse e-mail par code, récupération de compte par e-mail.
+  La connexion, le mot de passe oublié, le renvoi de code et l'abonnement à la newsletter ne
+  révèlent pas si une adresse est connue (`PreventUserExistenceErrors` et réponses identiques) ;
+  seule l'inscription répond `409 USER_EXISTS` pour une adresse déjà utilisée.
 - Les clients envoient le **jeton d'identité** (`idToken`, durée de vie 60 min) dans l'en-tête
   `Authorization: Bearer <idToken>` ; le `refreshToken` (30 jours) permet d'en obtenir un nouveau et
   peut être révoqué (`POST /auth/logout`).
 - L'**authorizer Lambda** vérifie cryptographiquement chaque jeton (signature RS256 via les clés
   publiques JWKS de Cognito, expiration, émetteur, audience = client de l'application,
   `token_use = id`). API Gateway rejette (`401`) toute requête invalide **avant** d'invoquer la
-  logique métier et met le résultat en cache 5 minutes par jeton.
+  logique métier et met le résultat en cache 5 minutes par jeton (un jeton expiré ou un compte
+  désactivé peut donc encore passer pendant ce délai). Une indisponibilité des clés publiques de
+  Cognito donne une erreur 5xx réessayable, jamais un `401` qui déconnecterait l'utilisateur.
 - Les routes publiques qui acceptent un jeton optionnel (ex. `GET /posts/{id}` pour qu'un auteur
   relise son brouillon) le vérifient avec **le même module** (`aws-jwt-verify`).
 
@@ -359,7 +367,7 @@ faible (`guest-author`) ; seul un administrateur peut promouvoir un utilisateur.
 | Permission | admin | editor | guest-author | anonyme |
 |---|:-:|:-:|:-:|:-:|
 | Lire les articles publiés, commentaires approuvés, tags, recherche | ✔ | ✔ | ✔ | ✔ |
-| Commenter (modération si anonyme) / s'abonner | ✔ | ✔ | ✔ | ✔ |
+| Commenter (modération sauf pour l'équipe éditoriale) / s'abonner | ✔ | ✔ | ✔ | ✔ |
 | Créer un article (brouillon) | ✔ | ✔ | ✔ | |
 | Modifier / supprimer **ses** brouillons, les soumettre à relecture | ✔ | ✔ | ✔ | |
 | Lire, modifier, supprimer **tous** les articles | ✔ | ✔ | | |
@@ -373,7 +381,10 @@ faible (`guest-author`) ; seul un administrateur peut promouvoir un utilisateur.
 En plus des permissions, le code vérifie la **propriété** des ressources (un auteur invité ne
 modifie que ses propres articles, et seulement tant qu'ils ne sont pas publiés). Une ressource que
 l'appelant n'a pas le droit de voir (le brouillon d'un autre) renvoie **404** et non 403, pour ne
-pas révéler son existence. Un administrateur ne peut ni se rétrograder ni se désactiver lui-même.
+pas révéler son existence. Un administrateur ne peut ni se rétrograder ni se désactiver lui-même,
+et chaque opération d'administration revérifie dans Cognito que l'appelant est toujours un
+administrateur actif : un administrateur rétrogradé ou désactivé perd ses droits immédiatement,
+sans attendre l'expiration de son jeton.
 
 ### 6.3 Moindre privilège et protection des données
 
@@ -384,7 +395,9 @@ pas révéler son existence. Un administrateur ne peut ni se rétrograder ni se 
 - **Chiffrement au repos** partout (DynamoDB, S3 SSE-S3, SQS SSE) et **en transit** (TLS imposé :
   la politique du bucket refuse toute requête non chiffrée, CloudFront redirige vers HTTPS).
 - **Bucket S3 privé** (Block Public Access, propriété des objets imposée) ; lecture publique
-  uniquement via CloudFront avec **Origin Access Control** et en-têtes de sécurité gérés.
+  uniquement via CloudFront avec **Origin Access Control** et en-têtes de sécurité gérés, et
+  seulement pour les fichiers validés par `MediaProcessor` (tag S3 `blogify-status=ready` exigé par
+  la politique du bucket).
 - **Sauvegarde continue** de la table (Point-In-Time Recovery, 35 jours).
 
 ### 6.4 Validation des entrées et des fichiers
@@ -404,8 +417,9 @@ pas révéler son existence. Un administrateur ne peut ni se rétrograder ni se 
 - **Throttling API Gateway** : 100 req/s (rafale 200) par défaut, limites renforcées sur
   `/auth/register` (5 req/s), `/auth/login` (10 req/s), `/auth/forgot-password` (2 req/s),
   la création de commentaires (5 req/s) et les abonnements (2 req/s).
-- **Commentaires** : modération obligatoire pour les anonymes, champ *honeypot* anti-robots,
-  e-mails des lecteurs jamais exposés publiquement.
+- **Commentaires** : modération obligatoire pour tous sauf l'équipe éditoriale (n'importe qui peut
+  créer un compte auteur invité), champ *honeypot* anti-robots, e-mails des lecteurs jamais exposés
+  publiquement.
 - **Newsletter** : double opt-in natif de SNS (e-mail de confirmation) et lien de désabonnement
   dans chaque message.
 - **Pas d'énumération de comptes** : `POST /auth/forgot-password` répond toujours `202`.
@@ -414,13 +428,14 @@ pas révéler son existence. Un administrateur ne peut ni se rétrograder ni se 
 
 | Mécanisme | Mise en œuvre |
 |---|---|
-| Rejeu des traitements asynchrones | Streams : 5 tentatives, découpage du lot en cas d'erreur (`BisectBatchOnFunctionError`), échecs partiels (`ReportBatchItemFailures`) ; EventBridge : 3 tentatives sur 1 h |
+| Rejeu des traitements asynchrones | Streams : 5 tentatives, découpage du lot en cas d'erreur (`BisectBatchOnFunctionError`), échecs partiels (`ReportBatchItemFailures`) ; médias : 2 nouvelles tentatives de l'invocation asynchrone (`EventInvokeConfig`), et EventBridge réessaie la livraison pendant 1 h |
 | Lettres mortes | File SQS `ProcessingDLQ` (rétention 14 jours) pour les enregistrements qui échouent définitivement |
-| Idempotence | Compteurs de tags modifiés uniquement via des transactions conditionnelles ; marqueur de notification (`Put` conditionnel) empêchant les e-mails en double ; traitement des médias ignoré s'il a déjà eu lieu |
+| Idempotence | Compteurs de tags modifiés uniquement via des transactions conditionnelles ; marqueur de notification écrit dans une transaction qui vérifie que l'article est toujours publié (pas d'e-mail en double ni pour un article supprimé) ; traitement des médias ignoré s'il a déjà eu lieu |
 | Ordre des événements | Traitement séquentiel des enregistrements d'un lot ; arrêt au premier échec pour préserver l'ordre par article |
-| Concurrence | Verrouillage optimiste (`version` / `If-Match`), conditions DynamoDB, transactions |
+| Concurrence | Verrouillage optimiste (`version` / `If-Match`), conditions DynamoDB, transactions ; commentaires écrits seulement si l'article est encore publié |
+| Délais réseau | Chaque client du SDK AWS a des délais de connexion (2 s) et de requête (5 s) et 3 tentatives : un appel bloqué échoue vite au lieu d'attendre le délai maximal de la fonction |
 | Journaux | Format JSON natif de Lambda, groupe de logs dédié avec rétention, requêtes CloudWatch Logs Insights possibles sur `requestId`, `route`, `status`, `durationMs` |
-| Traces | AWS X-Ray activé sur API Gateway et toutes les fonctions |
+| Traces | AWS X-Ray activé sur API Gateway et toutes les fonctions (les appels au SDK AWS ne sont pas instrumentés : voir SCALABILITY.md) |
 | Santé | `GET /health` (supervision externe) |
 
 ## 8. Choix techniques justifiés

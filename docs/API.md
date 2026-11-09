@@ -59,14 +59,17 @@ Trois catégories de routes :
 | Protégées | jeton obligatoire, vérifié par l'authorizer d'API Gateway (`401` sinon) | toutes les autres |
 
 Un changement de rôle (par un administrateur) prend effet au prochain jeton : l'utilisateur doit se
-reconnecter ou rafraîchir ses jetons.
+reconnecter ou rafraîchir ses jetons. API Gateway met en cache la vérification d'un jeton pendant
+5 minutes : un jeton expiré ou un compte désactivé peut donc encore passer l'authorizer pendant ce
+délai. Les routes d'administration (`/users`) revérifient en revanche, à chaque appel, dans Cognito,
+que l'appelant est toujours un administrateur actif (`403` sinon).
 
 ## 3. Rôles et permissions
 
 | Action | `admin` | `editor` | `guest-author` | anonyme |
 |---|:-:|:-:|:-:|:-:|
 | Lire les articles publiés, les commentaires approuvés, rechercher | ✔ | ✔ | ✔ | ✔ |
-| Commenter (modération obligatoire pour les anonymes) | ✔ | ✔ | ✔ | ✔ |
+| Commenter (approuvé immédiatement pour l'équipe éditoriale, modéré sinon) | ✔ | ✔ | ✔ | ✔ |
 | S'abonner à la newsletter | ✔ | ✔ | ✔ | ✔ |
 | Créer un article (brouillon) | ✔ | ✔ | ✔ | |
 | Modifier / supprimer ses brouillons, les soumettre à relecture | ✔ | ✔ | ✔ | |
@@ -88,7 +91,7 @@ permet au front-end d'afficher ou de masquer les actions.
 | Code | Signification |
 |---|---|
 | `200 OK` | Lecture ou modification réussie |
-| `201 Created` | Ressource créée ; l'en-tête `Location` donne son URL |
+| `201 Created` | Ressource créée ; l'en-tête `Location` donne son chemin, préfixe du stage inclus (ex. `/dev/posts/<id>`) |
 | `202 Accepted` | Demande prise en compte (e-mail envoyé, abonnement en attente de confirmation) |
 | `204 No Content` | Suppression ou déconnexion réussie |
 | `400 Bad Request` | Corps ou paramètres invalides |
@@ -124,7 +127,7 @@ permet au front-end d'afficher ou de masquer les actions.
 |---|---|---|
 | `VALIDATION_ERROR` | 400 | Champ manquant, invalide, hors limites ou inconnu |
 | `BAD_REQUEST` | 400 | JSON invalide, curseur invalide, en-tête `If-Match` mal formé… |
-| `INVALID_PASSWORD`, `INVALID_CODE`, `EXPIRED_CODE`, `INVALID_PARAMETER` | 400 | Erreurs Cognito lors de l'inscription, de la confirmation ou de la réinitialisation |
+| `INVALID_PASSWORD`, `INVALID_CODE`, `EXPIRED_CODE`, `INVALID_PARAMETER` | 400 | Erreurs Cognito (inscription, confirmation, réinitialisation) ou SNS (abonnement refusé) |
 | `INVALID_PARENT` | 400 | Réponse à un commentaire inexistant ou non approuvé |
 | `UNAUTHORIZED` | 401 | Jeton manquant, invalide ou expiré |
 | `INVALID_CREDENTIALS` | 401 | E-mail ou mot de passe incorrect |
@@ -139,19 +142,24 @@ permet au front-end d'afficher ou de masquer les actions.
 | `INVALID_STATE_TRANSITION` | 409 | Transition impossible depuis le statut actuel |
 | `CONFLICT` | 409 | Modification concurrente (réessayer) |
 | `SELF_MODIFICATION` | 409 | Un administrateur ne peut pas changer son propre rôle ni se désactiver |
-| `ALREADY_SUBSCRIBED` | 409 | Adresse déjà abonnée avec d'autres préférences |
+| `TAG_SUBSCRIPTIONS_FULL` | 409 | Quota SNS des abonnements filtrés par tags atteint : s'abonner sans tags |
 | `PRECONDITION_FAILED` | 412 | Version périmée (`If-Match`) |
 | `PAYLOAD_TOO_LARGE` | 413 | Corps de requête ou média trop volumineux |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type` non JSON ou type de média refusé |
 | `TOO_MANY_REQUESTS` | 429 | Limite de débit (API Gateway ou Cognito) |
 | `INTERNAL_ERROR` | 500 | Erreur inattendue (détails uniquement dans les journaux) |
-| `SERVICE_UNAVAILABLE` | 503 | Service AWS momentanément saturé (en-tête `Retry-After`) |
+| `UNSUPPORTED_CHALLENGE` | 501 | Défi d'authentification Cognito non géré par l'API (ex. MFA, désactivé sur le user pool) |
+| `SERVICE_UNAVAILABLE` | 503 | Service AWS momentanément saturé ou clés publiques Cognito indisponibles (en-tête `Retry-After`) |
+
+Les erreurs produites par API Gateway lui-même ont le même format, avec pour `code` le type de
+réponse de la passerelle : `UNAUTHORIZED`, `FORBIDDEN`, `TOO_MANY_REQUESTS`, `ROUTE_NOT_FOUND`, et
+pour les cas plus rares `AUTHORIZER_FAILURE`, `INTEGRATION_TIMEOUT`, `REQUEST_TOO_LARGE`…
 
 ### 4.3 Validation
 
 Les corps et paramètres sont validés par des schémas stricts : les chaînes sont nettoyées des espaces
-en début et fin, les **champs inconnus sont refusés** (`400`), et chaque erreur est listée dans
-`details`.
+en début et fin, les **champs et paramètres de requête inconnus sont refusés** (`400`), un
+identifiant mal formé dans le chemin aussi, et chaque erreur est listée dans `details`.
 
 ### 4.4 Pagination
 
@@ -194,8 +202,10 @@ Au-delà, API Gateway répond `429 TOO_MANY_REQUESTS`.
 
 Les index de **tags** (`GET /tags`, `GET /posts?tag=`) et de **recherche** (`GET /search`) sont
 mis à jour de façon asynchrone par DynamoDB Streams, généralement en moins d'une seconde après une
-publication, une modification ou une dépublication. Les listes servies par les index secondaires
-(`GET /posts`, files de modération, médiathèque) sont également cohérentes à terme.
+publication, une modification, une dépublication ou un changement du nombre de commentaires. Les
+listes servies par les index secondaires (`GET /posts`, files de modération, médiathèque) sont
+également cohérentes à terme. Seule la lecture d'une ressource par son identifiant
+(`GET /posts/{postId}`, `GET /media/{mediaId}`…) reflète immédiatement les écritures.
 
 ---
 
@@ -205,15 +215,19 @@ publication, une modification ou une dépublication. Les listes servies par les 
 |---|---|---|
 | `POST /auth/register` | `email`, `password`, `name` (1–80) | `201` `{ userId, email, name, role, confirmed, nextStep }` |
 | `POST /auth/confirm` | `email`, `code` | `200` `{ confirmed: true }` |
-| `POST /auth/resend-code` | `email` | `202` `{ message }` |
-| `POST /auth/login` | `email`, `password` | `200` jetons, ou défi `NEW_PASSWORD_REQUIRED` |
+| `POST /auth/resend-code` | `email` | `202` `{ message }` (toujours, compte inconnu ou déjà confirmé compris) |
+| `POST /auth/login` | `email`, `password` (non vide) | `200` jetons, ou défi `NEW_PASSWORD_REQUIRED` ; `401 INVALID_CREDENTIALS` sinon |
 | `POST /auth/refresh` | `refreshToken` | `200` nouveaux jetons |
 | `POST /auth/new-password` | `email`, `newPassword`, `session` | `200` jetons |
 | `POST /auth/forgot-password` | `email` | `202` `{ message }` (toujours, même si le compte n'existe pas) |
 | `POST /auth/reset-password` | `email`, `code`, `newPassword` | `200` `{ message }` |
 | `POST /auth/logout` | `refreshToken` | `204` |
 
-Mot de passe : 8 caractères minimum dont une minuscule, une majuscule et un chiffre.
+Mot de passe (inscription, nouveau mot de passe) : 8 caractères minimum dont une minuscule, une
+majuscule et un chiffre. À la connexion, tout mot de passe non vide est transmis à Cognito, qui répond
+`401` s'il est incorrect (la politique n'est jamais rappelée). Si un compte n'a encore aucun rôle
+(incident lors de l'inscription), la connexion lui attribue `guest-author` et renvoie des jetons qui
+le contiennent déjà.
 
 ```bash
 curl -s -X POST "$API/auth/register" -H 'Content-Type: application/json' \
@@ -258,7 +272,7 @@ Pour un compte créé par un administrateur (mot de passe temporaire), la connex
 | `PATCH /me` | authentifié | Modifier `name` (1–80), `bio` (≤ 1000), `avatarUrl`, `website` (URL ; `null` pour effacer) |
 | `GET /authors/{userId}` | public | Profil public : `id, name, bio, avatarUrl, website` (jamais l'e-mail) |
 | `GET /users` | admin | Liste des comptes : `limit` (1–60, défaut 20), `cursor`, `role` (filtre facultatif) |
-| `POST /users` | admin | Inviter un utilisateur : `email`, `name`, `role` → Cognito envoie un mot de passe temporaire ; `201` |
+| `POST /users` | admin | Inviter un utilisateur : `email`, `name`, `role` → Cognito envoie un mot de passe temporaire ; `201` (`Location: /authors/{id}`). Réinviter une adresse dont le compte ne s'est jamais connecté renvoie l'invitation (`200`) ; autre compte existant : `409 USER_EXISTS` |
 | `PATCH /users/{userId}` | admin | Changer `role` (`admin`, `editor`, `guest-author`) et/ou `enabled` (`false` = désactivation et déconnexion de toutes ses sessions) |
 
 Un utilisateur administré est représenté ainsi :
@@ -315,7 +329,7 @@ prochains jetons) ; les articles déjà écrits conservent le nom d'auteur de le
 
 | Méthode et route | Accès | Description |
 |---|---|---|
-| `GET /posts` | optionnel | Liste paginée, du plus récent au plus ancien |
+| `GET /posts` | optionnel | Liste paginée, du plus récent au plus ancien (date de publication pour les articles publiés, de dernière modification sinon) |
 | `GET /posts/{postId}` | optionnel | Un article par **identifiant ou slug** (+ `ETag`) |
 | `POST /posts` | `post:create` | Crée un brouillon → `201` + `Location` + `ETag` |
 | `PATCH /posts/{postId}` | auteur ou éditeur | Modification partielle (`If-Match` conseillé) |
@@ -393,9 +407,11 @@ Corps de création :
 | `authorEmail` | e-mail facultatif (lecteur anonyme) ; jamais affiché publiquement |
 | `parentId` | facultatif : réponse à un commentaire approuvé du même article |
 
-Un commentaire anonyme est créé avec le statut `pending` et n'apparaît qu'après approbation ; un
-commentaire d'un membre ayant un rôle est approuvé immédiatement. `commentCount` (sur l'article)
-compte les commentaires approuvés.
+Seuls les commentaires de l'équipe éditoriale (`editor`, `admin`) sont approuvés immédiatement. Les
+autres (lecteurs anonymes, auteurs invités — n'importe qui pouvant créer un compte auteur invité —,
+comptes sans rôle) sont créés avec le statut `pending` et n'apparaissent qu'après modération.
+Un commentaire n'est accepté que sur un article publié (`404` sinon, y compris si l'article est
+supprimé ou dépublié au même moment). `commentCount` (sur l'article) compte les commentaires approuvés.
 
 ```bash
 curl -s -X POST "$API/posts/$POST_ID/comments" -H 'Content-Type: application/json' \
@@ -481,10 +497,12 @@ await fetch(media.upload.url, { method: 'POST', body: form });   // 204 attendu
 S3 refuse un fichier plus gros que la taille déclarée ou d'un autre type.
 
 **3. Attendre la validation** : quelques instants plus tard, `GET /media/{mediaId}` renvoie
-`status: "ready"` et l'`url` publique (CloudFront) à utiliser dans les articles. Si le contenu ne
-correspond pas au type déclaré (vérification de la signature binaire), le fichier est supprimé et
-le média passe en `rejected` avec un `rejectionReason`. Une déclaration jamais suivie d'upload
-expire au bout de 24 h.
+`status: "ready"` et l'`url` publique (CloudFront) à utiliser dans les articles. CloudFront ne sert
+que les fichiers validés : tant qu'un fichier n'a pas été contrôlé, son URL CDN répond `403`. Si le
+contenu ne correspond pas au type déclaré (vérification de la signature binaire), le fichier est
+supprimé et le média passe en `rejected` avec un `rejectionReason`. Une déclaration jamais suivie
+d'upload expire au bout de 24 h. Après `DELETE /media/{mediaId}`, une copie peut rester en cache
+dans CloudFront jusqu'à 24 h (voir l'invalidation dans le guide de déploiement).
 
 ## 10. Recherche et tags
 
@@ -518,7 +536,7 @@ français et anglais. Les résultats sont classés par nombre de termes trouvés
 
 | Méthode et route | Accès | Description |
 |---|---|---|
-| `POST /subscriptions` | public | `{ "email": "...", "tags": ["aws"] }` → `202` ; Amazon SNS envoie un e-mail de confirmation (double opt-in) |
+| `POST /subscriptions` | public | `{ "email": "...", "tags": ["aws"] }` → `202` ; Amazon SNS envoie un e-mail de confirmation (double opt-in). La réponse est identique si l'adresse est déjà abonnée (elle garde ses préférences ; se désabonner pour les changer) |
 | `GET /subscriptions` | admin | Abonnés : `{ items: [{ email, status, subscriptionArn }], nextCursor }` (`status` : `pending_confirmation` ou `confirmed`) |
 
 Sans `tags`, l'abonné reçoit tous les nouveaux articles ; avec `tags`, seulement ceux qui portent au
