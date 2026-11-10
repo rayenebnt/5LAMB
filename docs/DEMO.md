@@ -4,12 +4,13 @@
 
 | Quand | Quoi |
 |---|---|
+| Avant tout | Compte personnel : créer le budget « zéro dépense » (`docs/DEPLOYMENT.md` §10.3) |
 | J-5 à J-3 | Déployer la stack (`npm run deploy:guided`), créer l'administrateur, lancer `npm run smoke` (tout doit être vert) |
 | J-3 | Répéter la démo avec `npm run demo` ; télécharger le diaporama en PowerPoint |
 | J-2 | **Plan B** : enregistrer une vidéo de la démo (2-3 min) et faire des captures (sorties de la stack, Swagger UI, smoke test) |
 | J-1 | Vérifier que la stack répond (`curl <ApiUrl>/health`) ; sur AWS Academy, démarrer le lab à l'avance (les identifiants expirent à la fin de la session) |
 | Jour J | Lab démarré, terminal ouvert dans le projet, onglet Swagger UI prêt (`<ApiUrl>/docs`), vidéo de secours sur le bureau |
-| Après la note | Supprimer la stack (`docs/DEPLOYMENT.md` §11) |
+| Juste après la soutenance | Supprimer la stack (`docs/DEPLOYMENT.md` §11) pour rester à 0 € ; la garder seulement si le jury demande à tester |
 
 ## 2. Déroulé proposé (≈ 20 min)
 

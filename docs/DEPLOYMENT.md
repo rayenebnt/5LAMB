@@ -14,7 +14,7 @@ plateforme Blogify sur un compte AWS (y compris un compte **AWS Academy Learner 
 7. [Cas particulier : AWS Academy Learner Lab](#7-cas-particulier--aws-academy-learner-lab)
 8. [Développement et tests en local](#8-développement-et-tests-en-local)
 9. [Supervision et exploitation](#9-supervision-et-exploitation)
-10. [Coûts](#10-coûts)
+10. [Coûts : rester à 0 € sur un compte personnel](#10-coûts--rester-à-0--sur-un-compte-personnel)
 11. [Suppression de la stack](#11-suppression-de-la-stack)
 12. [Dépannage](#12-dépannage)
 
@@ -78,7 +78,7 @@ Réponses recommandées aux questions de `sam deploy --guided` :
 | Parameter AutoConfirmUsers | `true` pour une démonstration, `false` en production |
 | Parameter EnableMediaCdn | `true` (CloudFront) ; `false` si votre compte ne peut pas créer de distribution |
 | Parameter MaxImageSizeMB / MaxVideoSizeMB | `10` / `200` |
-| Parameter LogRetentionDays | `14` |
+| Parameter LogRetentionDays | `14` (`7` sur un compte personnel, voir §10) |
 | Parameter LambdaRoleArn | vide (SAM crée un rôle par fonction) — **`LabRole` sur AWS Academy** |
 | Confirm changes before deploy | `Y` |
 | Allow SAM CLI IAM role creation | `Y` |
@@ -262,22 +262,59 @@ CloudFormation indépendante (table, user pool, bucket… séparés).
   aws sqs receive-message --queue-url <ProcessingDLQUrl> --max-number-of-messages 10
   ```
 
-## 10. Coûts
+## 10. Coûts : rester à 0 € sur un compte personnel
 
-Tous les services sont facturés à l'usage ; une démonstration reste dans les offres gratuites :
+L'architecture n'a **aucun coût fixe** : pas de serveur allumé en permanence, pas de NAT, pas de
+cache API Gateway, pas de Provisioned Concurrency, pas de clé KMS gérée par le client, pas de WAF.
+Tant que personne n'appelle l'API, la facture se limite au stockage de quelques kilo-octets.
 
-| Service | Offre gratuite (indicative) | Au-delà |
+### 10.1 Vérifier le type de compte
+
+Dans la console : **Billing and Cost Management › Free Tier** (ou la page du compte).
+
+| Type de compte | Ce qui se passe |
+|---|---|
+| **Free plan** (compte créé depuis le 15 juillet 2025) | Aucune facturation possible tant que vous ne passez pas au *Paid plan* : la consommation est déduite des crédits offerts (100 $ à l'ouverture, jusqu'à 200 $). Le plan prend fin après 6 mois ou quand les crédits sont épuisés ; le compte est alors fermé. Certains services peuvent être indisponibles : si la création d'une ressource échoue, voir §12. N'adhérez pas à AWS Organizations, ce qui fait passer automatiquement au *Paid plan* |
+| **Paid plan** ou compte plus ancien | Offres gratuites permanentes (*Always Free*) et, pour les comptes récents, offres de 12 mois ; **au-delà, la consommation est facturée** : appliquez §10.3 |
+
+### 10.2 Ce que coûte une démonstration
+
+| Service | Offre gratuite | Usage d'une démo (smoke test + plusieurs répétitions) |
 |---|---|---|
-| Lambda | 1 M requêtes + 400 000 Go-s / mois | ≈ 0,20 $ / M requêtes (arm64 : -20 % sur la durée) |
-| API Gateway REST | 1 M appels / mois (12 premiers mois) | ≈ 3,50 $ / M appels |
-| DynamoDB (à la demande) | 25 Go de stockage | ≈ 0,125 $ / M unités de lecture, 0,625 $ / M unités d'écriture |
-| S3 | 5 Go (12 premiers mois) | ≈ 0,023 $ / Go-mois |
-| CloudFront | 1 To de transfert / mois | selon la zone |
-| Cognito | 10 000 utilisateurs actifs / mois | selon le palier |
-| SNS (e-mail) | 1 000 e-mails / mois | ≈ 2 $ / 100 000 e-mails |
+| Lambda | 1 M requêtes + 400 000 Go-s / mois, permanent | quelques milliers d'invocations → 0 $ |
+| API Gateway REST | 1 M appels / mois pendant 12 mois (sinon ≈ 3,50 $ / M) | quelques milliers d'appels → < 0,01 $ |
+| DynamoDB à la demande | 25 Go de stockage, permanent ; requêtes ≈ 0,625 $ / M écritures | quelques dizaines de milliers d'écritures (index de recherche compris) → < 0,02 $ |
+| PITR (sauvegarde continue) | — | ≈ 0,20 $ / Go-mois, table < 1 Mo → ≈ 0 $ |
+| Cognito (palier **Essentials**, fixé dans le template) | 10 000 utilisateurs actifs / mois, permanent | 0 $ |
+| S3 | 5 Go pendant 12 mois (sinon ≈ 0,023 $ / Go-mois) | quelques Ko d'images + artefacts SAM → ≈ 0 $ |
+| CloudFront | 1 To + 10 M requêtes / mois, permanent | 0 $ |
+| SNS, SQS, EventBridge | 1 000 e-mails, 1 M publications et 1 M messages / mois, permanent ; événements S3 gratuits | 0 $ |
+| CloudWatch Logs, X-Ray | 5 Go de journaux et 100 000 traces / mois, permanent | 0 $ |
 
-La seule dépense fixe possible est le stockage (DynamoDB, S3, journaux) ; il n'y a **aucun serveur
-allumé en permanence**.
+**Total réaliste : moins de 0,10 $ même sans aucune offre gratuite.** Les prix sont indicatifs
+(us-east-1) ; consultez les pages de tarification AWS pour votre région.
+
+### 10.3 Filets de sécurité (5 minutes, à faire avant le premier déploiement)
+
+1. **Budget « zéro dépense »** : *Billing and Cost Management › Budgets › Create budget › Use a
+   template › Zero spend budget*, avec votre adresse e-mail. Vous êtes prévenu dès le premier centime.
+2. **Alertes de l'offre gratuite** : *Billing preferences › Alert preferences › Receive AWS Free Tier
+   alerts*.
+3. **Pas de compte root au quotidien** : MFA sur le compte root, puis un utilisateur IAM (ou IAM
+   Identity Center) pour la CLI. Ne publiez jamais vos clés d'accès (dépôt Git, capture d'écran, ZIP).
+4. **Gardez la stack peu de temps** : déployez quelques jours avant la soutenance et supprimez-la
+   juste après (§11). L'URL de l'API est aléatoire, mais elle est publique : un tiers qui la
+   connaîtrait pourrait générer du trafic. Le throttling (100 req/s, bien moins sur l'inscription
+   et la connexion) limite ce risque sans l'annuler ; supprimer la stack l'élimine.
+
+### 10.4 Paramètres conseillés pour un compte personnel
+
+Les valeurs par défaut conviennent. Seule recommandation : `LogRetentionDays` = `7`. Laissez
+`EnableMediaCdn` à `true` (CloudFront est gratuit à ce volume) ; passez-le à `false` seulement si
+la création de la distribution échoue.
+
+Ne pas activer pour la démo (cités dans `SCALABILITY.md` mais **payants**) : cache API Gateway,
+Provisioned Concurrency, AWS WAF, OpenSearch, DAX, Global Tables.
 
 ## 11. Suppression de la stack
 
@@ -293,12 +330,24 @@ sam delete --stack-name blogify-dev
 La table DynamoDB, le user pool, le topic SNS, la file SQS, la distribution CloudFront et les
 journaux sont supprimés avec la stack.
 
+`sam deploy` a aussi créé, une fois pour toutes, une stack `aws-sam-cli-managed-default` contenant
+un bucket d'artefacts (quelques Mo). Si vous n'utilisez plus SAM sur ce compte : console S3 ›
+bucket `aws-sam-cli-managed-default-samclisourcebucket-…` › **Vider** (supprime aussi les anciennes
+versions), puis :
+
+```bash
+aws cloudformation delete-stack --stack-name aws-sam-cli-managed-default
+```
+
+Vérifiez enfin, une semaine plus tard, que *Billing › Bills* affiche 0,00 $ pour le mois.
+
 ## 12. Dépannage
 
 | Symptôme | Cause probable / solution |
 |---|---|
 | `sam deploy` : *Unable to upload artifact … dist/…* | Les bundles n'existent pas : lancer `npm run build` (ou utiliser `npm run deploy`) |
 | `CREATE_FAILED` sur `MediaDistribution` (*account must be verified*) | Compte récent ou restreint : redéployer avec `EnableMediaCdn=false` |
+| Création refusée sur un compte *Free plan* (service non disponible avec ce plan) | Si c'est `MediaDistribution` : redéployer avec `EnableMediaCdn=false` ; sinon, noter le service indiqué dans l'événement CloudFormation et consulter la liste des services du Free plan |
 | `not authorized to perform: iam:CreateRole` | Compte sans droits IAM (AWS Academy) : renseigner `LambdaRoleArn` |
 | `401 UNAUTHORIZED` sur une route protégée | Envoyer le **idToken** (pas l'accessToken) : `Authorization: Bearer <idToken>` ; jeton expiré après 60 min → `POST /auth/refresh` |
 | `403` juste après un changement de rôle | Le rôle est lu dans le jeton : se reconnecter ou rafraîchir le jeton |
