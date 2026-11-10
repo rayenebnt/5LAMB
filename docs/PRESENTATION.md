@@ -158,7 +158,9 @@ bornés ; journaux JSON structurés, traces X-Ray (API Gateway et Lambda), `GET 
 
 ## 20. Démonstration et conclusion
 
-Démo : Swagger UI → inscription → brouillon → upload d'image → soumission → publication par un
-éditeur → recherche / tags → commentaire modéré (ou `npm run smoke`).
+Démo guidée (`npm run demo -- --stack blogify-dev`, une étape par appui sur Entrée) : inscription →
+brouillon → upload d'image → `412` / `403` → soumission → publication par un éditeur → recherche /
+tags → commentaire modéré ; Swagger UI (`/docs`) en complément. Déroulé détaillé, plan B et questions
+probables du jury : [DEMO.md](DEMO.md).
 Conclusion : toutes les exigences (principales et optionnelles) sont couvertes, l'architecture est
 prête à évoluer sans modifier le cœur de l'API.

@@ -83,6 +83,7 @@ curl -s "$API/search?q=serverless"
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Guide de déploiement et de configuration |
 | [docs/SCALABILITY.md](docs/SCALABILITY.md) | Recommandations d'évolutivité et d'optimisation des performances |
 | [docs/PRESENTATION.md](docs/PRESENTATION.md) | Support de la présentation orale (plan et notes) |
+| [docs/DEMO.md](docs/DEMO.md) | Préparation de la soutenance : déroulé, démonstration guidée, plan B, questions du jury |
 
 ## Structure du dépôt
 
@@ -92,7 +93,7 @@ src/lib/             Socle partagé (routeur HTTP, erreurs, validation, auth/RBA
 src/domain/          Logique métier (articles, commentaires, médias, utilisateurs, recherche, tags, notifications)
 src/functions/       Points d'entrée des 13 fonctions Lambda
 tests/               Tests unitaires, d'intégration (DynamoDB Local) et utilitaires
-scripts/             Build esbuild, smoke test, création d'administrateur, archive ZIP
+scripts/             Build esbuild, smoke test, démo guidée, création d'administrateur, archive ZIP
 events/              Événements d'exemple pour `sam local invoke`
 docs/                Documentation
 ```
@@ -109,4 +110,5 @@ docs/                Documentation
 | `npm run deploy:guided` / `npm run deploy` | Build + déploiement SAM (guidé / avec la configuration enregistrée) |
 | `npm run bootstrap-admin -- --email … --password …` | Crée ou promeut un administrateur |
 | `npm run smoke -- --stack …` | Smoke test de bout en bout sur la stack déployée |
+| `npm run demo -- --stack …` | Démonstration guidée pas à pas pour la soutenance (`--auto`, `--keep`) |
 | `npm run zip` | Archive `blogify-source.zip` du dépôt (dernier commit) pour le dépôt Moodle |
