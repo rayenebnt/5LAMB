@@ -42,6 +42,8 @@ function shorten(value) {
   return JSON.stringify(
     value,
     (key, v) => {
+      // Signed upload form: list the field names only (no temporary credentials on screen).
+      if (key === 'fields' && v && typeof v === 'object') return `<${Object.keys(v).length} champs signés : ${Object.keys(v).join(', ')}>`;
       if (typeof v !== 'string') return v;
       if (/token|session|policy|signature|credential/i.test(key) && v.length > 24) return `${v.slice(0, 20)}…`;
       return v.length > 120 ? `${v.slice(0, 117)}…` : v;

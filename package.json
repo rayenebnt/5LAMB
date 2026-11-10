@@ -20,7 +20,7 @@
     "deploy": "npm run build && sam deploy",
     "deploy:guided": "npm run build && sam deploy --guided",
     "smoke": "node scripts/smoke-test.mjs",
-    "demo": "node scripts/demo.mjs",
+    "demo": "node --no-warnings scripts/demo.mjs",
     "bootstrap-admin": "node scripts/bootstrap-admin.mjs",
     "zip": "node scripts/make-zip.mjs"
   },
