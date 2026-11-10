@@ -1,167 +1,156 @@
-# Blogify — support de présentation
+# Blogify — support de présentation et script
 
-Plan de la soutenance (≈ 20 minutes + démonstration), avec le contenu de chaque diapositive et des
-notes pour l'oral. Le diaporama correspondant est fourni séparément (export PowerPoint / PDF).
+Soutenance courte : **10 diapositives (≈ 9 min) puis la démonstration (≈ 4 min)**. Le diaporama est
+fourni séparément (export PowerPoint / PDF) ; le texte « À dire » ci-dessous figure aussi dans les
+notes d'orateur de chaque diapositive. Déroulé de la démonstration et questions probables du jury :
+[DEMO.md](DEMO.md).
+
+| # | Diapositive | Durée |
+|---|---|---|
+| 1 | Titre | 30 s |
+| 2 | Périmètre | 45 s |
+| 3 | Architecture globale | 1 min 15 |
+| 4 | Six choix structurants | 1 min |
+| 5 | Une seule table DynamoDB | 1 min |
+| 6 | Sécurité en couches | 1 min |
+| 7 | Conventions de l'API REST | 45 s |
+| 8 | Workflow éditorial et bonus | 1 min |
+| 9 | Passer à l'échelle | 1 min |
+| 10 | Conclusion, puis démonstration | 30 s + 4 min |
 
 ---
 
 ## 1. Titre
 
 **Blogify — une plateforme de blogging headless 100 % serverless sur AWS**
-Mini-projet AWS Lambda · API REST · DynamoDB · S3 · Cognito
+API Gateway · Lambda · DynamoDB · S3 + CloudFront · Cognito · SNS · EventBridge · AWS SAM
 
-> *Notes* : présenter le contexte en une phrase : une startup veut un backend de blog évolutif,
-> intégrable à n'importe quel front-end.
+> **À dire** : Bonjour. Je vous présente Blogify, le backend d'une plateforme de blogging headless,
+> c'est-à-dire sans interface graphique : tout passe par une API REST, que n'importe quel site ou
+> application peut utiliser. Tout repose sur des services serverless d'AWS, donc aucun serveur à
+> gérer. Je vais présenter l'architecture, les données, la sécurité, l'API et l'évolutivité, puis
+> faire une démonstration.
 
-## 2. Contexte et objectifs
+## 2. Périmètre — toutes les exigences sont couvertes
 
-- Blogify cible créateurs de contenu, journalistes et entreprises.
-- Besoin : un **CMS headless** (contenu exposé par API, aucun rendu côté serveur).
-- Contraintes : évolutivité, coût proportionnel à l'usage, sécurité, intégration facile.
-- Réponse : architecture **serverless et orientée événements** sur AWS.
-
-## 3. Périmètre réalisé
-
-| Exigence | Statut |
+| Exigence du sujet | Statut |
 |---|---|
-| Authentification sécurisée + rôles admin / éditeur / auteur invité | ✔ |
-| CRUD des articles via Lambda, stockage DynamoDB | ✔ |
-| Médias (images, vidéos) sur S3 | ✔ |
-| API REST sécurisée via API Gateway | ✔ |
-| *Optionnel* : commentaires + modération | ✔ |
-| *Optionnel* : recherche | ✔ |
-| *Optionnel* : notifications aux abonnés | ✔ |
+| Authentification + 3 rôles | Réalisé |
+| CRUD des articles (Lambda + DynamoDB) | Réalisé |
+| Médias images et vidéos sur S3 | Réalisé |
+| API REST sécurisée (API Gateway) | Réalisé |
+| Commentaires et modération · Recherche · Notifications | Bonus réalisés |
 
-Chiffres clés : **42 routes REST**, **13 fonctions Lambda**, 1 table DynamoDB, **503 tests
-unitaires** et un scénario d'intégration de 8 étapes, documentation OpenAPI interactive.
+**42** routes REST · **13** fonctions Lambda · **0** serveur à administrer
 
-## 4. Architecture globale
+> **À dire** : Le sujet demandait quatre fonctionnalités et en proposait trois en option. Les sept
+> sont réalisées : authentification avec trois rôles, CRUD des articles, médias sur S3 et API
+> sécurisée ; puis, en bonus, commentaires modérés, recherche et notifications. Au total : 42 routes
+> REST et 13 fonctions Lambda.
 
-Schéma : front-ends → API Gateway (+ authorizer Lambda) → fonctions Lambda par domaine → DynamoDB /
-Cognito / S3 ; S3 → EventBridge → validation des médias ; DynamoDB Streams → projections (tags,
-recherche) et notifications (SNS, EventBridge) ; SQS pour les échecs.
+## 3. Architecture globale
 
-> *Notes* : insister sur la séparation **synchrone** (réponse rapide) / **asynchrone** (effets de bord).
+Front-ends → API Gateway (+ authorizer Lambda / Cognito) → fonctions Lambda par domaine → DynamoDB ;
+médias : S3 + CloudFront ; en asynchrone : validation des fichiers (EventBridge), index de tags et de
+recherche (DynamoDB Streams), notifications (SNS, EventBridge).
 
-## 5. Composants serverless
+> **À dire** : Le client appelle API Gateway avec un jeton. Un authorizer Lambda vérifie ce jeton
+> émis par Cognito, puis la requête arrive à la fonction du domaine concerné, qui lit et écrit dans
+> DynamoDB. Les fichiers ne passent pas par l'API : ils vont directement dans S3 et sont servis par
+> CloudFront. Tout ce qui est en pointillés est asynchrone : validation des fichiers, index de
+> recherche et notifications. La réponse à l'utilisateur reste donc rapide.
 
-API Gateway (REST, throttling, CORS) · Lambda Node.js 24 arm64 · DynamoDB à la demande ·
-S3 + CloudFront (OAC) · Cognito (user pool + groupes) · SNS · EventBridge · SQS (DLQ) ·
-CloudWatch + X-Ray · AWS SAM (Infrastructure as Code).
+## 4. Six choix structurants
 
-## 6. Choix d'architecture
+API REST (quotas par route, erreurs homogènes) · authorizer Lambda (JWT vérifié à l'entrée, cache
+5 min) · une Lambda par domaine (moindre privilège) · event-driven · arm64 + esbuild · AWS SAM.
 
-- **Une Lambda par contexte métier** + séparation lecture/écriture des articles (CQRS léger).
-- **Authorizer Lambda** vérifiant les JWT Cognito (mis en cache 5 min).
-- **Event-driven** : Streams et EventBridge découplent index, notifications et validation.
-- **arm64 + bundles esbuild** : coût réduit, démarrages à froid courts.
-- **SAM** : toute l'infrastructure versionnée, déployable en une commande.
+> **À dire** : Six choix structurants. API Gateway en mode REST, pour les quotas par route et les
+> erreurs personnalisées. La vérification des jetons à l'entrée, avec un cache de cinq minutes. Une
+> fonction par domaine, pour des permissions minimales. Des événements pour sortir les traitements
+> lourds de la requête. Des processeurs ARM, environ 20 % moins chers. Et AWS SAM : toute
+> l'infrastructure est du code, déployée en une commande.
 
-## 7. Modélisation des données
+## 5. Une seule table DynamoDB
 
-- **Single-table design** : articles, slugs, commentaires, médias, profils, tags, termes de recherche.
-- Clés génériques `PK`/`SK` + 2 GSI surchargés ; identifiants UUID v7 ordonnés dans le temps.
-- 13 motifs d'accès, chacun servi par **une seule requête** (`GetItem`/`Query`, jamais de `Scan`).
+Article `POST#id`, slug `SLUG#slug`, commentaire `POST#id / COMMENT#id`, média, profil, projections de
+tags et de recherche. 13 motifs d'accès, chacun servi par un seul `GetItem` ou `Query` ; 2 index pour
+les listes ; mode à la demande, Streams, TTL, PITR.
 
-## 8. Index et cohérence
+> **À dire** : Toutes les données sont dans une seule table DynamoDB. Chaque type d'élément, article,
+> commentaire, média ou profil, a une clé pensée pour la façon dont on le lit. Résultat : chaque
+> besoin de lecture est servi par une seule requête, jamais par un parcours complet de la table.
+> Deux index servent les listes. Le déploiement réel m'a appris une limite : DynamoDB copie au plus
+> 20 attributs choisis dans un index ; les index copient donc les éléments complets, et l'API ne
+> renvoie que des résumés dans les listes.
 
-- GSI1 : articles par statut, par tag, file de modération, médiathèque.
-- GSI2 : articles et médias d'un utilisateur.
-- Projection `ALL` (DynamoDB limite `INCLUDE` à 20 attributs par index) ; les listes ne renvoient
-  que des résumés, jamais le corps des articles.
-- Transactions (slug unique, compteurs), verrouillage optimiste (`ETag`/`If-Match`), TTL.
+## 6. Une sécurité en couches
 
-## 9. Sécurité — authentification
+Authentification (JWT Cognito vérifiés à l'entrée) · rôles (matrice de permissions + propriété) ·
+entrées et fichiers (validation stricte, contenu réel vérifié, SVG refusé) · infrastructure (un rôle
+IAM minimal par fonction, chiffrement, bucket privé, quotas).
 
-- Cognito : politique de mots de passe, vérification d'e-mail, jetons JWT (ID 60 min, refresh 30 j).
-- `Authorization: Bearer <idToken>` vérifié par l'authorizer : signature RS256 (JWKS), expiration,
-  émetteur, audience, type de jeton.
-- Routes publiques à authentification optionnelle (relecture de ses brouillons).
+> **À dire** : La sécurité est en couches. Cognito gère les comptes et émet des jetons signés,
+> vérifiés à l'entrée de l'API avant qu'une fonction soit appelée. Les trois rôles du sujet sont des
+> groupes Cognito, traduits en permissions : par exemple, un auteur invité peut écrire et soumettre,
+> mais pas publier. Chaque requête est validée strictement, et un fichier envoyé est vérifié sur son
+> contenu réel, pas seulement sur son extension. Enfin, chaque fonction n'a que les droits dont elle
+> a besoin.
 
-## 10. Sécurité — autorisations
+## 7. Conventions de l'API REST
 
-Matrice RBAC (admin / editor / guest-author / anonyme) + contrôle de propriété ; 404 pour les
-ressources invisibles ; un auteur invité ne peut pas publier ; un admin ne peut pas se rétrograder,
-et les opérations d'administration revérifient l'état du compte dans Cognito.
-**Moindre privilège** : un rôle IAM par fonction, lecture seule pour les fonctions publiques.
+Ressources au pluriel, verbes HTTP standard · 201 + `Location`, 204, 400, 401, 403, 404, 409, 412,
+429 · erreurs `{ error: { code, message }, requestId }` · pagination `nextCursor` · `ETag` /
+`If-Match` · OpenAPI 3 + Swagger UI (`/docs`).
 
-## 11. Sécurité — données et entrées
+> **À dire** : L'API suit les conventions REST : des ressources au pluriel, les verbes HTTP standard
+> et des codes précis, par exemple 201 à la création, ou 412 si quelqu'un a modifié l'article
+> entre-temps. Les erreurs ont toujours le même format, les listes sont paginées, et toute l'API est
+> documentée en OpenAPI, avec une interface Swagger en ligne.
 
-- Validation stricte de chaque entrée (schémas zod), corps limité à 1 Mio.
-- Médias : POST présigné (taille + type imposés par S3), vérification des *magic bytes*, SVG refusé.
-- Chiffrement au repos et en transit, bucket privé + CloudFront OAC.
-- Throttling par route, honeypot, modération, double opt-in, pas d'énumération de comptes.
+## 8. Workflow éditorial et bonus
 
-## 12. Conception de l'API
+`draft → in_review → published → archived` (+ rejet avec note, dépublication) · commentaires
+modérés · recherche par pertinence · e-mail aux abonnés filtré par tags.
 
-- Ressources REST : `/posts`, `/posts/{id}/comments`, `/media`, `/users`, `/me`, `/tags`, `/search`…
-- Verbes HTTP et codes de statut standard (201 + `Location`, 204, 400, 401, 403, 404, 409, 412, 429).
-- Erreurs homogènes `{ error: { code, message, details }, requestId }`.
-- Pagination par curseur opaque `nextCursor` ; cache HTTP (`Cache-Control`, `ETag`).
-- Documentation OpenAPI 3 + Swagger UI servie par l'API (`/docs`).
+> **À dire** : Un article suit un workflow : l'auteur écrit un brouillon et le soumet ; l'éditeur le
+> publie, ou le rejette avec une note, ce qui le renvoie en brouillon. Chaque étape vérifie le rôle :
+> un auteur invité qui tente de publier reçoit une erreur 403. Côté bonus : les commentaires des
+> lecteurs passent en modération, la recherche classe les articles par pertinence, et les abonnés
+> reçoivent un e-mail à chaque publication, filtré selon leurs tags.
 
-## 13. Points de terminaison
+## 9. Passer à l'échelle
 
-| Domaine | Routes |
+Déjà en place : sans état, à la demande, cache HTTP, médias sur CDN, asynchrone. Recommandations :
+CloudFront devant l'API, Provisioned Concurrency, OpenSearch, digest e-mail, Global Tables + WAF.
+
+> **À dire** : L'architecture passe déjà à l'échelle seule : aucun état en mémoire, une base à la
+> demande, des médias sur CDN et des traitements asynchrones. Pour une très forte charge, je
+> recommande d'abord un cache CloudFront devant l'API, puis la concurrence provisionnée contre les
+> démarrages à froid, OpenSearch pour la recherche, et le multi-région pour une audience mondiale.
+
+## 10. Conclusion et démonstration
+
+**7 / 7** exigences · **24 / 24** étapes du test sur AWS · **503** tests unitaires.
+
+> **À dire** : Pour conclure : les sept fonctionnalités du sujet sont couvertes, le projet est testé
+> et réellement déployé sur AWS, où le scénario complet passe, pour un coût quasi nul. Je vous
+> propose maintenant une démonstration en direct. Chaque appui sur Entrée envoie une vraie requête à
+> l'API déployée.
+
+---
+
+## Script de la démonstration (≈ 4 min)
+
+Commande : `npm run demo -- --stack blogify-dev --region eu-west-3`. Une phrase par moment clé :
+
+| Étape | À dire |
 |---|---|
-| Auth | register, confirm, resend-code, login, refresh, new-password, forgot/reset-password, logout |
-| Utilisateurs | `/me`, `/authors/{id}`, `/users` (admin : liste, invitation, rôle, activation) |
-| Articles | CRUD + `submit`, `publish`, `unpublish`, `reject`, `archive` |
-| Commentaires | liste, création, modération, suppression, file `/comments` |
-| Médias | demande d'upload, liste, détail, texte alternatif, suppression |
-| Découverte | `/search`, `/tags` |
-| Abonnements | `/subscriptions` |
-| Outils | `/docs`, `/openapi.json`, `/health` |
-
-## 14. Exemple : créer puis publier un article
-
-```http
-POST /posts
-Authorization: Bearer eyJraWQiOi...
-Content-Type: application/json
-
-{ "title": "Architecture serverless", "content": "# Intro…", "tags": ["aws"] }
-```
-→ `201 Created`, `Location: /posts/{id}`, `ETag: "v1"`, statut `draft`.
-Puis `POST /posts/{id}/submit` (auteur) → `POST /posts/{id}/publish` (éditeur).
-
-## 15. Workflow éditorial et commentaires
-
-Diagramme d'états : `draft → in_review → published → archived` (+ rejet avec note, dépublication).
-Commentaires : lecteurs et auteurs invités en attente de modération, équipe éditoriale approuvée
-automatiquement, compteur atomique, réponses à un commentaire.
-
-## 16. Fonctionnalités optionnelles
-
-- **Recherche** : index inversé dans DynamoDB (titre ×10, tags ×6, extrait ×3, contenu), normalisation
-  des accents, mots vides FR/EN, classement par pertinence.
-- **Notifications** : e-mail SNS aux abonnés (filtrage par tags), événement EventBridge
-  `PostPublished` pour webhooks et sites statiques ; idempotence garantie.
-
-## 17. Résilience et observabilité
-
-Retries, découpage des lots, échecs partiels, DLQ SQS, consommateurs idempotents, délais réseau
-bornés ; journaux JSON structurés, traces X-Ray (API Gateway et Lambda), `GET /health`.
-
-## 18. Qualité et déploiement
-
-- 503 tests unitaires (SDK AWS simulé) + intégration sur DynamoDB Local avec rejeu des Streams ;
-  revue adversariale indépendante de chaque domaine, constats corrigés.
-- Smoke test de bout en bout sur la stack réelle ; CI GitHub Actions ; `cfn-lint`.
-- Déploiement : `npm run deploy:guided` (paramètres : stage, CORS, CDN, AWS Academy `LabRole`…).
-
-## 19. Évolutivité et performances
-
-- Déjà en place : stateless, à la demande, cache HTTP, compression, médias hors API, asynchrone.
-- Points de contention : partition `POSTS#published`, compteurs de tags, recherche, cold starts.
-- Recommandations : CloudFront devant l'API, Provisioned Concurrency, OpenSearch, WAF,
-  write sharding, Global Tables, digest e-mail, Step Functions, EventBridge Scheduler.
-
-## 20. Démonstration et conclusion
-
-Démo guidée (`npm run demo -- --stack blogify-dev`, une étape par appui sur Entrée) : inscription →
-brouillon → upload d'image → `412` / `403` → soumission → publication par un éditeur → recherche /
-tags → commentaire modéré ; Swagger UI (`/docs`) en complément. Déroulé détaillé, plan B et questions
-probables du jury : [DEMO.md](DEMO.md).
-Conclusion : toutes les exigences (principales et optionnelles) sont couvertes, l'architecture est
-prête à évoluer sans modifier le cœur de l'API.
+| 2-3 · Inscription, connexion | « Je crée un compte : il reçoit automatiquement le rôle le plus faible, auteur invité, et Cognito me renvoie un jeton. » |
+| 5 · `401` | « Sans jeton, la requête est refusée à l'entrée, avant même d'appeler une fonction. » |
+| 6-7 · Brouillon, `404` | « L'article est créé en brouillon ; pour un visiteur, il n'existe pas. » |
+| 8 · Image | « Le fichier part directement dans S3 ; une fonction vérifie son contenu, puis il est servi par CloudFront. » |
+| 9-10 · `412`, `403` | « Une modification concurrente est refusée, et un auteur invité ne peut pas publier. » |
+| 11-12 · Publication | « Il soumet, l'éditeur relit et publie. » |
+| 14 · Recherche | « L'article est déjà indexé : l'index est mis à jour en arrière-plan. » |
+| 15 · Commentaire | « Un lecteur commente, l'éditeur approuve, le commentaire devient public. » |

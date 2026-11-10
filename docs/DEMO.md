@@ -12,20 +12,18 @@
 | Jour J | Lab démarré, terminal ouvert dans le projet, onglet Swagger UI prêt (`<ApiUrl>/docs`), vidéo de secours sur le bureau |
 | Juste après la soutenance | Supprimer la stack (`docs/DEPLOYMENT.md` §11) pour rester à 0 € ; la garder seulement si le jury demande à tester |
 
-## 2. Déroulé proposé (≈ 20 min)
+## 2. Déroulé proposé (≈ 13 min)
 
 | Durée | Partie | Diapositives |
 |---|---|---|
-| 2 min | Contexte, objectifs, périmètre | 1 à 3 |
-| 4 min | Architecture et choix de conception | 4 à 6 |
-| 2 min | Modélisation des données | 7 à 8 |
-| 3 min | Sécurité | 9 à 11 |
-| 3 min | Conception de l'API | 12 à 14 |
-| 2 min | Fonctionnalités, résilience, qualité | 15 à 18 |
-| 2 min | Évolutivité et performances | 19 |
-| 5 min | **Démonstration**, puis conclusion | 20 |
+| 1 min 15 | Introduction et périmètre | 1 à 2 |
+| 2 min 15 | Architecture et choix de conception | 3 à 4 |
+| 2 min | Données et sécurité | 5 à 6 |
+| 1 min 45 | API et fonctionnalités | 7 à 8 |
+| 1 min 30 | Évolutivité et conclusion | 9 à 10 |
+| 4 min | **Démonstration** | — |
 
-Les notes d'orateur de chaque diapositive contiennent le texte à dire.
+Le texte à dire figure dans les notes d'orateur et dans [PRESENTATION.md](PRESENTATION.md).
 
 ## 3. La démonstration
 
@@ -71,7 +69,7 @@ l'API (30 % de la note) en même temps que le fonctionnement.
 
 Le diaporama est un artefact Claude : ouvrez-le, puis utilisez **Partager › Exporter** (ou le bouton
 de téléchargement) et choisissez **PowerPoint (.pptx)** ou **PDF**. Ajoutez votre nom sur la
-couverture et, si vous le souhaitez, une capture de Swagger UI ou du smoke test sur la diapositive 18.
+couverture et, si vous le souhaitez, une capture du smoke test (24/24) sur la conclusion.
 
 ## 5. Questions probables du jury
 
