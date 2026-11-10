@@ -315,11 +315,13 @@ les commentaires par date de création dans la partition de leur article.
 
 ### 5.4 Décisions de modélisation
 
-- **Projection sélective des index (`INCLUDE`)** : les GSI ne copient que les attributs utiles aux
-  listes (titre, extrait, tags, auteur, dates…) et **pas le corps des articles**. Les listes
-  consomment ainsi peu de capacité de lecture et les écritures dans les index restent petites.
-  Le catalogue des attributs projetés est centralisé dans `src/lib/schema.mjs` et un test vérifie
-  qu'il correspond exactement au template.
+- **Projection `ALL` des index** : DynamoDB limite une projection `INCLUDE` à 20 attributs non-clés
+  par index, or nos GSI surchargés servent quatre types d'éléments (articles, appartenances aux
+  tags, commentaires, médias), soit plus de 30 attributs. Les index copient donc les éléments
+  complets ; les fonctions de mise en forme (`toApiPost`…) ne renvoient dans les listes que des
+  résumés, jamais le corps des articles. Contrepartie : une liste consomme une capacité de lecture
+  proportionnelle à la taille des articles. À grande échelle, le corps irait dans un élément séparé
+  ou dans S3 (voir `SCALABILITY.md`). Un test vérifie le type de projection et les limites DynamoDB.
 - **Dénormalisation maîtrisée** : le nom de l'auteur est copié dans l'article, le titre de l'article
   dans le commentaire (contexte pour les modérateurs) et le résumé de l'article dans les éléments
   de tags et de recherche, pour éviter toute lecture supplémentaire.

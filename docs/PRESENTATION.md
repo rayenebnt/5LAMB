@@ -67,7 +67,8 @@ CloudWatch + X-Ray · AWS SAM (Infrastructure as Code).
 
 - GSI1 : articles par statut, par tag, file de modération, médiathèque.
 - GSI2 : articles et médias d'un utilisateur.
-- Projection `INCLUDE` : les listes ne lisent jamais le corps des articles.
+- Projection `ALL` (DynamoDB limite `INCLUDE` à 20 attributs par index) ; les listes ne renvoient
+  que des résumés, jamais le corps des articles.
 - Transactions (slug unique, compteurs), verrouillage optimiste (`ETag`/`If-Match`), TTL.
 
 ## 9. Sécurité — authentification

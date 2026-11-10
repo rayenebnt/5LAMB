@@ -7,20 +7,24 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { loadTemplate, apiRoutes } from '../helpers/template.mjs';
-import { GSI_PROJECTIONS } from '../../src/lib/schema.mjs';
 
 const template = loadTemplate();
 const routes = apiRoutes(template);
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const functionName = (codeUri) => codeUri.replace(/^dist\//, '').replace(/\/$/, '');
 
-test('GSI projections in template.yaml match src/lib/schema.mjs', () => {
+test('GSI projections are ALL and respect the DynamoDB limits', () => {
   const indexes = template.Resources.BlogTable.Properties.GlobalSecondaryIndexes;
-  assert.equal(indexes.length, Object.keys(GSI_PROJECTIONS).length);
+  assert.deepEqual(indexes.map((index) => index.IndexName), ['GSI1', 'GSI2']);
+  let projected = 0;
   for (const index of indexes) {
-    assert.equal(index.Projection.ProjectionType, 'INCLUDE');
-    assert.deepEqual([...index.Projection.NonKeyAttributes].sort(), GSI_PROJECTIONS[index.IndexName], index.IndexName);
+    assert.equal(index.Projection.ProjectionType, 'ALL', index.IndexName);
+    // CreateTable rejects INCLUDE lists longer than 20 attributes, or 100 across all indexes.
+    const attributes = index.Projection.NonKeyAttributes ?? [];
+    assert.ok(attributes.length <= 20, `${index.IndexName}: ${attributes.length} projected attributes`);
+    projected += attributes.length;
   }
+  assert.ok(projected <= 100);
 });
 
 test('every function has a source entry point', () => {

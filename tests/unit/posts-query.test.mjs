@@ -52,7 +52,7 @@ function postItem(overrides = {}) {
   };
 }
 
-/** Index entry of a post (GSI INCLUDE projection: no content, no customExcerpt). */
+/** Index entry of a post (summary attributes only; the mapper must not need more). */
 function summaryItem(n, overrides = {}) {
   const postId = `0192f5a1-7c2b-7d3e-8f40-${String(n).padStart(12, '0')}`;
   const { content, customExcerpt, ...summary } = postItem({

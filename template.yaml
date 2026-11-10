@@ -132,81 +132,13 @@ Resources:
             - { AttributeName: GSI1PK, KeyType: HASH }
             - { AttributeName: GSI1SK, KeyType: RANGE }
           Projection:
-            ProjectionType: INCLUDE
-            NonKeyAttributes:
-              - allowComments
-              - altText
-              - authorEmail
-              - authorId
-              - authorName
-              - body
-              - commentCount
-              - commentId
-              - contentType
-              - coverImageUrl
-              - createdAt
-              - entityType
-              - excerpt
-              - filename
-              - kind
-              - mediaId
-              - moderatedAt
-              - moderatedBy
-              - ownerId
-              - ownerName
-              - parentId
-              - postId
-              - postTitle
-              - publishedAt
-              - readingTimeMinutes
-              - rejectionReason
-              - reviewNote
-              - s3Key
-              - size
-              - slug
-              - status
-              - submittedAt
-              - tag
-              - tags
-              - title
-              - updatedAt
-              - version
+            ProjectionType: ALL
         - IndexName: GSI2
           KeySchema:
             - { AttributeName: GSI2PK, KeyType: HASH }
             - { AttributeName: GSI2SK, KeyType: RANGE }
           Projection:
-            ProjectionType: INCLUDE
-            NonKeyAttributes:
-              - allowComments
-              - altText
-              - authorId
-              - authorName
-              - commentCount
-              - contentType
-              - coverImageUrl
-              - createdAt
-              - entityType
-              - excerpt
-              - filename
-              - kind
-              - mediaId
-              - ownerId
-              - ownerName
-              - postId
-              - publishedAt
-              - readingTimeMinutes
-              - rejectionReason
-              - reviewNote
-              - s3Key
-              - size
-              - slug
-              - status
-              - submittedAt
-              - tags
-              - title
-              - updatedAt
-              - version
+            ProjectionType: ALL
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
       TimeToLiveSpecification:

@@ -77,6 +77,7 @@ couverture et, si vous le souhaitez, une capture de Swagger UI ou du smoke test 
 
 | Question | Réponse courte |
 |---|---|
+| Pourquoi une projection `ALL` sur les index ? | DynamoDB limite `INCLUDE` à 20 attributs par index et nos index servent quatre types d'éléments ; les listes ne renvoient que des résumés. À grande échelle : corps des articles dans un élément séparé ou dans S3 |
 | Pourquoi une seule table DynamoDB ? | Chaque motif d'accès est servi par une seule requête (`GetItem`/`Query`), sans jointure ni `Scan` ; latence constante quelle que soit la volumétrie |
 | Pourquoi un authorizer Lambda plutôt que l'authorizer Cognito natif ? | Il accepte `Bearer <jeton>`, normalise les rôles transmis aux fonctions et partage le code de vérification avec les routes à authentification optionnelle ; résultat mis en cache 5 min |
 | Comment sont gérés les rôles ? | Groupes Cognito → claim `cognito:groups` → matrice de permissions, plus contrôle de propriété ; les opérations d'administration revérifient l'état du compte dans Cognito |

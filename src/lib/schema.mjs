@@ -1,7 +1,8 @@
-// Item attribute catalogue shared by the code and the SAM template.
-// The GSIs use an INCLUDE projection (post bodies are NOT copied into the indexes):
-// every attribute returned by a listing served from a GSI must appear below, and
-// tests/unit/template.test.mjs checks that template.yaml projects all of them.
+// Item attribute catalogue shared by the code.
+// The GSIs use an ALL projection: DynamoDB caps INCLUDE projections at 20 non-key attributes
+// per index, and the overloaded GSIs serve several entity types (posts, tag memberships,
+// comments, media). Listings map index items to summaries (toApiPost without includeContent),
+// so post bodies never reach list responses.
 
 export const ENTITY = Object.freeze({
   POST: 'POST',
@@ -36,7 +37,7 @@ export const MEDIA_STATUS = Object.freeze({
   REJECTED: 'rejected',
 });
 
-/** Post attributes available in listings (GSI1 by status / tag, GSI2 by author). */
+/** Post attributes shown in listings, also copied into tag memberships (GSI1, TAG#<tag>). */
 export const POST_SUMMARY_ATTRIBUTES = Object.freeze([
   'entityType',
   'postId',
@@ -59,7 +60,7 @@ export const POST_SUMMARY_ATTRIBUTES = Object.freeze([
   'version',
 ]);
 
-/** Comment attributes available in the moderation queue (GSI1). */
+/** Comment attributes shown in the moderation queue (GSI1). */
 export const COMMENT_ATTRIBUTES = Object.freeze([
   'entityType',
   'commentId',
@@ -77,7 +78,7 @@ export const COMMENT_ATTRIBUTES = Object.freeze([
   'moderatedAt',
 ]);
 
-/** Media attributes available in media listings (GSI1 all media, GSI2 by owner). */
+/** Media attributes shown in media listings (GSI1 all media, GSI2 by owner). */
 export const MEDIA_ATTRIBUTES = Object.freeze([
   'entityType',
   'mediaId',
@@ -97,11 +98,3 @@ export const MEDIA_ATTRIBUTES = Object.freeze([
 
 /** Extra attribute of tag membership items (GSI1, partition TAG#<tag>). */
 export const TAG_POST_EXTRA_ATTRIBUTES = Object.freeze(['tag']);
-
-const unique = (...lists) => [...new Set(lists.flat())].sort();
-
-/** Non-key attributes projected into each GSI (must match template.yaml). */
-export const GSI_PROJECTIONS = Object.freeze({
-  GSI1: unique(POST_SUMMARY_ATTRIBUTES, COMMENT_ATTRIBUTES, MEDIA_ATTRIBUTES, TAG_POST_EXTRA_ATTRIBUTES),
-  GSI2: unique(POST_SUMMARY_ATTRIBUTES, MEDIA_ATTRIBUTES),
-});

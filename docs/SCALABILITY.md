@@ -27,7 +27,8 @@ Optimisations **déjà en place** :
 - **Clients SDK créés une seule fois** par environnement d'exécution et réutilisés (keep-alive TCP).
 - **Authorizer mis en cache 5 min** par jeton : la vérification JWT n'est pas refaite à chaque appel ;
   les clés publiques JWKS sont aussi mises en cache en mémoire.
-- **Projections `INCLUDE`** sur les index : les listes ne lisent jamais le corps des articles.
+- **Réponses de liste réduites à des résumés** : le corps des articles n'est jamais renvoyé par les
+  listes (voir §2 pour le coût de lecture lié à la projection `ALL` des index).
 - **Pagination par curseur** (`LastEvaluatedKey`) : coût constant quelle que soit la page.
 - **En-têtes `Cache-Control`** sur les lectures publiques (`public, max-age=60, stale-while-revalidate`)
   et **ETag** sur les articles : les navigateurs et CDN peuvent mettre en cache.
@@ -46,7 +47,7 @@ Optimisations **déjà en place** :
 | Démarrages à froid Lambda | Latence p99 plus élevée lors des pics | **Provisioned Concurrency** sur `PostsQuery` et l'authorizer aux heures de pointe (avec Application Auto Scaling) ; réglage mémoire avec **AWS Lambda Power Tuning** |
 | Concurrence Lambda du compte | `429` / *throttles* si la somme des fonctions dépasse le quota | Demander une augmentation de quota ; **concurrence réservée** pour isoler les fonctions critiques (lecture publique) des traitements asynchrones |
 | Quotas Cognito (authentification) | Erreurs `TooManyRequests` sur `/auth/login` lors d'un pic | Augmentation de quota ; jetons à durée de vie adaptée ; le cache de l'authorizer évite d'appeler Cognito pour les requêtes authentifiées |
-| Taille d'un élément DynamoDB (400 Ko) | Articles extrêmement longs | Stocker le corps dans S3 (référence dans l'élément) et ne garder que les métadonnées dans DynamoDB |
+| Projection `ALL` des index + taille d'un élément (400 Ko) | Les listes consomment une capacité de lecture proportionnelle à la taille des articles (corps compris) ; articles extrêmement longs | Stocker le corps dans un élément séparé (`POST#id / CONTENT`) ou dans S3 : les index ne contiennent plus que les métadonnées et les listes redeviennent très peu coûteuses |
 | Envoi d'e-mails à chaque publication | Coût et volume proportionnels à `articles × abonnés` | **Digest** quotidien (EventBridge Scheduler), Amazon SES avec modèles HTML, file SQS de lissage |
 
 ## 3. Recommandations par palier de trafic
